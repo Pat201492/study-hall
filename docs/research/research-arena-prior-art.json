@@ -1,0 +1,420 @@
+{
+ "key": "arena-prior-art",
+ "summary": "There is now mature prior art for exactly what you want to build. The closest architectural match is a three-layer stack that recurs in every serious system: (1) an **adapter layer** that normalises \"instruction + repo + shell → patch + token/cost telemetry\" across heterogeneous CLI agents (Terminal-Bench's `BaseAgent.perform_task()`, HAL's `--agent_dir/--agent_function`, Databricks Omnigent's executor abstraction \"messages and files in, text streams and tool calls out\"); (2) a **task corpus** built from a repo's own merged PRs linked to closed issues, split into FAIL_TO_PASS (tests the PR added) and PASS_TO_PASS (regression guard) — the SWE-bench construction recipe, now automated by SWE-smith/SWE-gen and SWE-bench-Live/RepoLaunch; (3) a **cost-aware scoring layer** that reports a Pareto frontier of accuracy vs dollars rather than a single number (HAL, \"AI Agents That Matter\", Artificial Analysis Coding Agent Index). Three findings should shape your design directly. First, the harness — not the model — dominates cost: Artificial Analysis measured a **32× cost swing ($0.07 → $2.26 per task)** across harnesses running the same model with near-identical code quality, and HAL found agents can be **100× more expensive for 1% more accuracy**. Second, hidden tests alone over-credit: METR had real maintainers blind-review 296 SWE-bench-passing patches and merge rates came in **~24 percentage points below the automated grader**, with rejections dominated by code-quality and \"breaks other code\". So you need a second grader (blind pairwise LLM judge or rubric) on top of tests. Third, run-to-run variance on SWE-bench-Verified-style corpora is **~2.0–3.4 pp SD across 5 repeats**, which at your N (dozens of tasks) swamps most harness differences unless you use paired-difference statistics — run every harness on the *same* task seeds and compare within-task deltas, which Anthropic's \"Adding Error Bars to Evals\" shows is a free variance reduction (per-question score correlation between frontier models is 0.3–0.7). For your scale, `Pat201492/dungeonworks` is an excellent corpus source: **141 closed issues, 120 merged PRs, 112 of them linked to a closing issue**, pure Python with `pytest` + `pyproject.toml` markers and sampled PRs that add test files (PR #293: 3 files/1 test file; #233: 13 files/3 test files). One important Windows caveat: Omnigent's sandbox on Windows is **process-tree Job Object containment only — no filesystem or network isolation** — so your isolation primitive should be git worktrees + Docker Desktop/WSL2, not a native Windows sandbox.",
+ "findings": [
+  {
+   "claim": "SWE-bench task instances are built from merged PRs that (a) are linked to an issue and (b) modify 1+ test files; the PR's tests split into FAIL_TO_PASS (fail before patch, pass after — the correctness signal) and PASS_TO_PASS (pass both before and after — the regression guard). This is the canonical recipe for turning a repo's own merged PRs into ground truth.",
+   "source_url": "https://www.swebench.com/original.html",
+   "confidence": "verified-official-doc",
+   "date_of_source": "ICLR 2024 paper (arXiv 2310.06770); fetched 2026-09-13"
+  },
+  {
+   "claim": "SWE-bench Verified is a 500-instance human-annotated subset of SWE-bench filtered for under-specified issue descriptions and unfair/overly-specific tests, released with a containerized evaluation harness.",
+   "source_url": "https://openai.com/index/introducing-swe-bench-verified/",
+   "confidence": "community-report",
+   "date_of_source": "Aug 2024; page returned HTTP 403 to automated fetch on 2026-09-13, claim from search summary + secondary sources"
+  },
+  {
+   "claim": "SWE-bench-Live automates corpus construction with a pipeline called RepoLaunch: crawl repos via the GitHub API, extract recent issues linked to merged PRs, then auto-build a working environment per instance. Demonstrates the full auto-curation loop you'd want for a private repo.",
+   "source_url": "https://arxiv.org/pdf/2505.23419",
+   "confidence": "verified-official-doc",
+   "date_of_source": "May 2025; fetched 2026-09-13"
+  },
+  {
+   "claim": "SWE-smith auto-synthesises task instances from a codebase (LM-errant-rewrites, AST mutation, undoing PRs, bug combination) and its SWE-gen component 'turns merged GitHub PRs into verifiable tasks automatically by detecting the language, build system, and test framework'. Directly reusable pattern for dungeonworks.",
+   "source_url": "https://swesmith.com/blog.html",
+   "confidence": "verified-official-doc",
+   "date_of_source": "arXiv 2504.21798, NeurIPS 2025 D&B Spotlight; fetched 2026-09-13"
+  },
+  {
+   "claim": "METR recruited 4 maintainers from 3 SWE-bench Verified repos (scikit-learn, Sphinx, pytest) to blind-review 296 AI patches that had already PASSED the automated grader. Maintainer merge rates were ~24 percentage points below grader scores; normalised against a 68% merge rate for human golden patches, maintainers merged roughly HALF as many AI patches as the grader accepted. Rejection reasons ranked: code quality, undocumented failures, breaking other code, not actually solving the issue.",
+   "source_url": "https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-03-10; fetched 2026-09-13"
+  },
+  {
+   "claim": "The Agentic Benchmark Checklist (ABC) formalises Task Validity ('solvable iff the agent has the target capability') and Outcome Validity; it found SWE-bench Verified uses insufficient test cases and TAU-bench counts empty responses as success, and that such flaws mis-estimate agent performance by up to 100% in relative terms.",
+   "source_url": "https://arxiv.org/abs/2507.02825",
+   "confidence": "verified-official-doc",
+   "date_of_source": "NeurIPS 2025; fetched 2026-09-13"
+  },
+  {
+   "claim": "Aider's polyglot benchmark = 225 hardest Exercism exercises across 6 languages, selected because at least 5 of 7 baseline models failed them. Model gets a SECOND attempt seeded with the failing unit-test output. Reported metrics: pass_rate_1 (first try), pass_rate_2 (after retry), percent_cases_well_formed, error_outputs, num_malformed_responses, syntax_errors, seconds_per_case, total_cost, commit_hash. Composite = (percent correct × percent correct edit format)/100.",
+   "source_url": "https://github.com/Aider-AI/aider/blob/main/benchmark/README.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Terminal-Bench agent adapters implement a single abstract method: `def perform_task(instruction: str, session: TmuxSession, logging_dir: Path | None = None) -> AgentResult`, plus a static `name() -> str`. AgentResult carries total_input_tokens, total_output_tokens, failure_mode (FailureMode enum), and timestamped_markers. This is the minimal normalisation contract for a multi-harness arena.",
+   "source_url": "https://raw.githubusercontent.com/laude-institute/terminal-bench/main/terminal_bench/agents/base_agent.py",
+   "confidence": "verified-source-code",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Terminal-Bench wraps installed CLI agents via AbstractInstalledAgent: ClaudeCodeAgent sets ANTHROPIC_API_KEY and ANTHROPIC_MODEL in `_env`, installs via a `claude-code-setup.sh.j2` template, and in `_run_agent_commands()` shells out to `claude <shell-escaped instruction> --verbose --output-format stream-json --allowedTools <list>` with an infinite timeout.",
+   "source_url": "https://raw.githubusercontent.com/laude-institute/terminal-bench/main/terminal_bench/agents/installed_agents/claude_code/claude_code_agent.py",
+   "confidence": "verified-source-code",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Terminal-Bench harness 'handles orchestrating agents, spinning up multi-container docker environments, logging agent actions, and verifying container state'. Each task = an English instruction + a test script that verifies completion + a reference ('oracle') solution. One container per concurrently running task.",
+   "source_url": "https://github.com/laude-institute/terminal-bench",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Terminal-Bench's `--n-attempts` flag runs k attempts per task and the harness computes pass@k when n_attempts > 1; `--n-concurrent` sets parallel tasks (one container each); `--livestream` streams logs; `--agent-import-path` (format `module.path:ClassName`) registers a custom agent; a RunLock in `tb.lock` captures run configuration and per-run `results.json` files can be merged across runs.",
+   "source_url": "https://www.tbench.ai/docs/run-terminal-bench-2-0",
+   "confidence": "community-report",
+   "date_of_source": "fetched 2026-09-13 via search aggregation of tbench.ai docs + deepwiki"
+  },
+  {
+   "claim": "Terminal-Bench's dataset registry adapts SWE-bench Verified, AppWorld, DevEval and EvoEval into the Terminal-Bench task framework WITHOUT altering task contents — each becomes (instruction, Docker environment, test script). The registry publishes parity-validation tables comparing original-benchmark scores against adapter scores for Terminus, Claude Code and Codex, i.e. they explicitly prove the adapter doesn't distort results.",
+   "source_url": "https://www.tbench.ai/news/registry-and-adapters",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "HAL (Holistic Agent Leaderboard, ICLR 2026) is a unified harness for reproducible, COST-CONTROLLED agent benchmarking. It instruments API calls via LiteLLM and logs token usage/cost via Weave automatically, without requiring agent code changes, and computes the accuracy-vs-cost Pareto frontier for every benchmark by default.",
+   "source_url": "https://github.com/princeton-pli/hal-harness",
+   "confidence": "verified-official-doc",
+   "date_of_source": "ICLR 2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "HAL's headline result: agents can be 100× more expensive while only 1% more accurate — a gap that leaderboards without cost reporting completely hide. Only 1 of 9 benchmarks had the most expensive model on the Pareto frontier. On 6 of 9 benchmarks token usage positively correlates with accuracy. Scale: 21,730 rollouts, 9 models × 9 benchmarks, ~$40,000 compute. Log analysis used Docent (LLM-based) over 2.5B tokens of traces to find shortcuts/gaming that accuracy metrics miss.",
+   "source_url": "https://arxiv.org/html/2510.11977v1",
+   "confidence": "verified-official-doc",
+   "date_of_source": "arXiv Oct 2025, ICLR 2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "HAL's paper does NOT report explicit confidence intervals, bootstrap procedures, or per-configuration repeat counts — a documented gap in the current state of the art that your arena should close with paired statistics.",
+   "source_url": "https://arxiv.org/html/2510.11977v1",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "'AI Agents That Matter' argues all agent evaluation must control for cost and that results should be visualised as a Pareto curve of accuracy vs inference cost; it showed trivial baselines (retry, warming) beat complex agents (Reflexion, LDB, LATS) on the cost-adjusted frontier, and insists on DOLLAR cost rather than proxies like parameter count.",
+   "source_url": "https://arxiv.org/pdf/2407.01502",
+   "confidence": "verified-official-doc",
+   "date_of_source": "arXiv 2407.01502, Jul 2024; fetched 2026-09-13"
+  },
+  {
+   "claim": "Artificial Analysis Coding Agent Index (launched May 2026) is the first public leaderboard scoring full agent STACKS (harness+model pairs, not models alone). Methodology: each benchmark score averages pass@1 across THREE attempts per task; binary scoring, tasks equally weighted; cost = pay-per-token API cost per task including non-cached input, cached-input discount, separate cache-write charges and output pricing; wall-clock is average per-task runtime excluding environment startup and harness overhead. Components: SWE-Bench-Pro-Hard-AA / DeepSWE v1.1, Terminal-Bench v2, SWE-Atlas-QnA. It publishes NO variance statements or error bars.",
+   "source_url": "https://artificialanalysis.ai/agents/coding-agents",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "The single most-cited number from the Coding Agent Index: a 32× cost swing ($0.07 to $2.26 per task) across different harnesses running the SAME model, with near-identical resulting code quality — i.e. the harness, not the model, sets your cost. This is the core justification for building a harness arena at all.",
+   "source_url": "https://medium.com/@wasowski.jarek/coding-agent-index-2026-benchmarking-full-agent-stacks-model-harness-4183305e4b90",
+   "confidence": "community-report",
+   "date_of_source": "2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "Harness-Bench is the closest published analogue to your arena: it FIXES the user-facing task, initial sandbox state, budget, timeout and evaluator while VARYING the harness, letting each harness run with its native behaviour (no forced standardisation). Design: 106 sandboxed offline tasks × 6 harnesses (+Codex as reference) × 8 model backends = 5,194 trajectories. Score = completion + a binary security gate + process quality (robustness, tool appropriateness, consistency) + token usage + turn counts. Found a 23.8-point spread across model-harness pairings, with weaker models far more sensitive to harness choice.",
+   "source_url": "https://arxiv.org/html/2605.27922v1",
+   "confidence": "verified-official-doc",
+   "date_of_source": "arXiv 2605.27922, 2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "Databricks Omnigent (Apache-2.0, open-sourced 2026-06-16) normalises harnesses to one interface: 'messages and files in, text streams and tool calls out'; its runner 'wraps any agent in a sandboxed session with a uniform API'. Supported executors include claude-native, codex-native, cursor-native, hermes-native, pi-native, claude-sdk, codex, cursor, hermes, opencode, pi, openai-agents, plus ACP-protocol harnesses (grok, devin). Agents are declared in YAML where a single `harness:` line swaps the runtime while tools/prompts/skills/policies stay the same.",
+   "source_url": "https://github.com/omnigent-ai/omnigent",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-06-16 open-sourced; fetched 2026-09-13"
+  },
+  {
+   "claim": "Omnigent's policy engine is the best existing model for budget capping in a meta-harness. Policies are declared under a top-level `policies:` key, evaluated in declaration order, and stack across three tiers (server-wide admin → per-agent → per-session, stricter wins, session checked first). Each returns ALLOW / DENY / ASK. Python signature: `def my_policy(event: PolicyEvent) -> PolicyResponse | None`. Built-ins include cost.cost_budget, cost.user_daily_cost_budget, safety.max_tool_calls_per_session, safety.ask_on_os_tools, safety.enforce_sandbox, routing.deny_trivial_to_expensive_model, block_working_dir_changes, risk_score_policy.",
+   "source_url": "https://github.com/omnigent-ai/omnigent/blob/main/docs/POLICIES.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Omnigent's cost_budget policy gates a session on cumulative LLM spend at BOTH the request phase (before the LLM turn, so text-only turns are budgeted too) and the tool-call phase. factory_params: max_cost_usd (required hard limit), ask_thresholds_usd (optional soft checkpoints that trigger ASK the first time each is crossed), expensive_models (case-insensitive model tier tokens to block once budget is tight).",
+   "source_url": "https://github.com/omnigent-ai/omnigent/blob/main/docs/POLICIES.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Omnigent has NO built-in scoring, grading or benchmarking layer. It ships a `tests/harness_bench/` capability matrix for behaviour parity, and the Databricks launch blog contains no evaluation metrics or harness comparisons. So Omnigent solves adapter normalisation + policy/budget, but you must build the arena's scoring yourself.",
+   "source_url": "https://www.databricks.com/blog/introducing-omnigent-meta-harness-combine-control-and-share-your-agents",
+   "confidence": "verified-official-doc",
+   "date_of_source": "June 2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "Omnigent's Windows sandboxing is materially weaker than Unix: macOS uses the built-in seatbelt sandbox, Linux mandates bubblewrap (bwrap) wrapping for native terminal harnesses, but Windows gets only process-tree Job Object containment with NO filesystem or network isolation. The L7 egress proxy is Unix-only. Critical constraint for a Windows-hosted arena.",
+   "source_url": "https://github.com/omnigent-ai/omnigent",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "mini-swe-agent is the minimal-harness reference point: ~100 lines for the agent class, bash as the only tool, no tool-calling API, scores >74% on SWE-bench Verified and claims to beat Claude Code and Codex on DeepSWE. Environments: local, Docker, Podman, Singularity/Apptainer, bubblewrap, Contree. It is the right 'control arm' baseline for an arena because it isolates model capability from harness engineering.",
+   "source_url": "https://github.com/SWE-agent/mini-swe-agent",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "OpenHands' evaluation harness pattern: get_config() → initialize_runtime() → process_instance() → run_evaluation(num_workers=N). Runtime is `runtime='docker'` with SandboxConfig(base_container_image=...). EvalMetadata = {LLM config, dataset name, agent class, max_iterations, eval note, output dir}; EvalOutput = {instance_id, instruction, test_result, metadata, history, metrics, error} serialised to output.jsonl. Its SWE-bench runner supports multiple runs for pass@k and auto-pulls prebuilt per-instance images (e.g. sweb.eval.x86_64.django_s_django-11011).",
+   "source_url": "https://docs.openhands.dev/openhands/usage/developers/evaluation-harness",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Anthropic's 'Adding Error Bars to Evals' (Miller et al., arXiv 2411.00640) recommends always reporting mean differences, standard errors, confidence intervals and correlations when comparing two or more models. Paired-difference analysis is a 'free' variance-reduction technique well suited to model evals because frontier models' per-question score correlation runs 0.3–0.7. SE of the paired difference = sqrt(Var(s_A−B)/n) computed over per-question score differences. Includes a power formula for choosing #questions and #resamples per question.",
+   "source_url": "https://www.anthropic.com/research/statistical-approach-to-model-evals",
+   "confidence": "verified-official-doc",
+   "date_of_source": "Nov 2024; fetched 2026-09-13"
+  },
+  {
+   "claim": "Chatbot Arena / LMArena computes rankings by fitting a Bradley-Terry model via MLE to all pairwise votes (BT is the MLE of the Elo model under a fixed unknown pairwise win-rate, and unlike online Elo is order-independent and computed centrally). 95% CIs come from bootstrap: resample rows of the matchup dataset 100 times, refit BT on each, take the median as the rating and the quantiles as error bars. Votes are NOT sampled uniformly — active sampling prioritises comparisons that most reduce rank uncertainty among closely-matched models.",
+   "source_url": "https://www.lmsys.org/blog/2023-12-07-leaderboard/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2023-12-07 blog + arXiv 2403.04132; fetched 2026-09-13"
+  },
+  {
+   "claim": "Copilot Arena embeds blind pairwise comparisons into the IDE (two completions shown, Tab/Shift-Tab to pick) and ranks by learning Bradley-Terry coefficients that minimise loss predicting which model beats which. Over 25,000 completion battles / 100K completions / 11,000 users. Crucially it found Spearman correlation ≤0.1 with static benchmarks and only 0.48–0.62 with chat-based arenas — i.e. in-workflow pairwise preference measures something static benchmarks do not.",
+   "source_url": "https://www.alphaxiv.org/benchmarks/carnegie-mellon-university/copilot-arena",
+   "confidence": "community-report",
+   "date_of_source": "2025; fetched 2026-09-13"
+  },
+  {
+   "claim": "pass@k is widely misapplied in coding-agent benchmarks: implementations set n to the number of unit tests in ONE submission rather than the number of independent rollouts. The corrected metric, reliability@k, sets n = independent rollouts and c = fully-passing rollouts per (task, agent) pair.",
+   "source_url": "https://arxiv.org/abs/2608.14711",
+   "confidence": "verified-official-doc",
+   "date_of_source": "arXiv 2608.14711, 2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "Empirical run-to-run variance on SWE-bench-Verified-style corpora: standard deviation across five repeated runs was 2.0 pp (SWE-Doctor), 2.2 pp (mini-SWE-agent), 3.4 pp (live-SWE-agent). SWE-agent's own paper ran k ∈ {3,6} and found average performance variance low but PER-INSTANCE resolution changes considerably run to run. Pass@5 exceeded pass@1 by 8–12 pp for the same agents.",
+   "source_url": "https://arxiv.org/pdf/2607.00990",
+   "confidence": "community-report",
+   "date_of_source": "2026; fetched 2026-09-13 via search aggregation (SWE-Doctor paper + arXiv 2405.15793)"
+  },
+  {
+   "claim": "Recommended repeat protocol at k=3: report all three of Pass@3 (at least one trial succeeds — optimistic/capability ceiling), Pass@1 (mean per-trial success — the realistic number), and Pass^3 / pass^k (all three succeed — the reliability number). For an autonomous issue→PR engine, pass^k is the metric that actually predicts unattended success.",
+   "source_url": "https://prefactor.tech/learn/agent-benchmarks",
+   "confidence": "community-report",
+   "date_of_source": "2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "LLM-judge best practice for patch grading: pairwise comparison run in BOTH orderings to neutralise position bias (judges favour the first answer and reward verbosity), calibrate against human labels with Cohen's kappa, and never use the same model family as both generator and judge; decompose complex rubrics into discrete binary checks.",
+   "source_url": "https://www.openlayer.com/blog/llm-judge-evaluation-guide",
+   "confidence": "community-report",
+   "date_of_source": "March 2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "For code-patch judging specifically, a rubric-based LLM judge with a binary valid/invalid verdict achieved Cohen's κ = 0.75, precision 0.80, recall 0.94 on unanimously-agreed patches — whereas using the GROUND-TRUTH PATCH as the reference achieved only κ = 0.39. Implication: grade against a rubric derived from the issue, not against the human's diff.",
+   "source_url": "https://arxiv.org/pdf/2511.10865",
+   "confidence": "verified-official-doc",
+   "date_of_source": "arXiv 2511.10865; fetched 2026-09-13"
+  },
+  {
+   "claim": "Claude Code headless emits cost and turn telemetry directly: with `--output-format json` the payload includes `total_cost_usd` plus a per-model cost breakdown, along with type, subtype, is_error, duration_ms, duration_api_ms, num_turns, result, session_id. With `--json-schema` the structured result lands in `structured_output`. With `--output-format stream-json` the last line is a `result` message carrying cost + session metadata, and permission denials are listed in `permission_denials`.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Claude Code has a native hard budget cap: `--max-budget-usd <amount>` is the 'maximum dollar amount to spend on API calls before stopping (print mode only)'. Spend from subagents counts toward the cap; once reached, spawning another subagent fails with `Budget limit reached` and Claude Code stops still-running background subagents. `--max-turns N` is the complementary agentic-turn cap and exits with an error at the limit. Both are print-mode only — exactly the two knobs an arena needs.",
+   "source_url": "https://code.claude.com/docs/en/cli-reference",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Claude Code's dollar figures are client-side estimates computed locally from token counts at list price (unless a managed `modelPricing` table is set), and the `/usage` docs explicitly note that for Max and Pro subscribers 'the session cost figure isn't relevant for billing purposes' since usage is included in the subscription. So on a subscription, $/task is a comparable list-price PROXY, not a bill — which is still exactly what you want for cross-harness comparison.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Claude Code `--bare` skips auto-discovery of hooks, skills, custom commands, subagents, plugins, MCP servers, auto memory and CLAUDE.md — 'useful for CI and scripts where you need the same result on every machine'. This is the reproducibility flag for an arena. BUT: 'In bare mode, Claude Code never reads OAuth credentials or the system keychain' — bare mode does NOT use your subscription login and requires ANTHROPIC_API_KEY. Anthropic notes --bare 'is the recommended mode for scripted and SDK calls, and will become the default for -p in a future release'.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Without --bare, a `claude -p` session runs the hooks in a project's .claude/settings.json and connects the servers in its .mcp.json even in an untrusted folder, with no workspace-trust dialog and no per-server approval prompt. For an arena that checks out arbitrary historical repo states into worktrees, this is a real supply-chain surface — pin it with --bare or --strict config.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Codex CLI non-interactive mode: `codex exec` (alias `codex e`) with `--json` / `--experimental-json` emits a newline-delimited JSON event stream including turn-completion events with token counts; `-o/--output-last-message <path>` writes the final assistant message to a file; `--output-schema <path>` enforces a JSON Schema; `--cd/-C <path>` sets the working directory; `-m/--model` overrides the model; `-c model_reasoning_effort=...` overrides reasoning effort. Sandbox policies: `--sandbox read-only|workspace-write|danger-full-access` (workspace-write recommended for unattended local work), `--add-dir <path>` to widen write access, `--dangerously-bypass-approvals-and-sandbox`/`--yolo` to disable both. `codex exec resume [SESSION_ID] --last|--all` continues prior non-interactive sessions.",
+   "source_url": "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Codex CLI has NO native dollar-budget flag equivalent to Claude Code's --max-budget-usd; cost must be derived by the arena from the token counts in the `--json` turn-completion events multiplied by a local price table. This is an adapter asymmetry you must normalise.",
+   "source_url": "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
+   "confidence": "inferred",
+   "date_of_source": "fetched 2026-09-13; absence of flag in official reference"
+  },
+  {
+   "claim": "OpenCode supports one-shot headless runs: `opencode run \"<prompt>\" -m/--model <provider>/<model>` with a `--format json` flag, and local models via an Ollama provider block in ~/.config/opencode/opencode.json pointing baseURL at http://localhost:11434/v1 (model id appears as `ollama/<tag>`). Critical gotcha: Ollama's default context is 2048–4096 tokens and OpenCode needs at least 16k for agentic tool use, or it silently truncates context and produces nonsensical edits.",
+   "source_url": "https://docs.ollama.com/integrations/opencode",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "HAL's agent contract is deliberately loose — 'no constraints on specific agent implementation or agent framework'. An agent is just a directory plus an entry function: `--agent_dir agents/my_agent/ --agent_function main.run`, with arbitrary config passed as `-A key=value` pairs. `--max_concurrent N` (default 1) controls parallelism. Results land in `results/` with per-run `output.json` and full traces. This dir+entrypoint+kwargs shape is the simplest adapter contract to copy.",
+   "source_url": "https://github.com/princeton-pli/hal-harness",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "mini-swe-agent's batch runner is the reference for a small-N sweep CLI: `mini-extra swebench` with `-m/--model`, `-c/--config`, `-o/--output`, `-w/--workers`, `--subset {lite,verified,full}`, `--split {dev,test}`, `--slice '0:5'`, `--filter <regex>`, `--shuffle`, `--redo-existing`. Note `--slice` and `--filter` are exactly the sampling knobs you need for budget control. Scoring is delegated: either `sb-cli submit` (cloud) or `python -m swebench.harness.run_evaluation` (local Docker).",
+   "source_url": "https://mini-swe-agent.com/latest/usage/swebench/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "SWE-bench's local Docker harness requirements are heavy: ≥120GB free storage; on Docker Desktop for Windows allocate at least 8 CPUs and 16GB RAM under Resources > Advanced; use fewer than min(0.75 × os.cpu_count(), 24) workers. Images are built in three layers (base → ~60 environment images → per-instance images). For a single-machine Windows arena this argues for a lightweight per-task container built once from your own repo, not the SWE-bench image pyramid.",
+   "source_url": "https://www.swebench.com/SWE-bench/guides/docker_setup/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Git worktrees are the consensus isolation primitive for parallel coding agents (each agent gets its own checked-out working directory sharing one .git object store, eliminating file-level conflicts without full clones), and are natively supported by Claude Code, Codex and Cursor. But worktrees isolate FILES, not ports, databases, or external accounts — the emerging production pattern is worktree-per-agent plus one lightweight container per worktree (Dagger's container-use) once you exceed ~4 concurrent agents.",
+   "source_url": "https://www.augmentcode.com/guides/git-worktrees-parallel-ai-agent-execution",
+   "confidence": "community-report",
+   "date_of_source": "2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "Anthropic's Consumer Terms prohibit automated access except via API key: 'Except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it, to access the Services through automated or non-human means, whether through a bot, script, or otherwise.' Also: 'You may not share your Account login information, Anthropic API key, or Account credentials with anyone else. You also may not make your Account available to anyone else.' And no reselling the Services.",
+   "source_url": "https://www.anthropic.com/legal/consumer-terms",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "The 'where we otherwise explicitly permit it' carve-out is load-bearing: Anthropic's own docs document `claude -p` non-interactive mode, scheduled tasks, /loop and Remote Control as supported subscription features, and the Claude Code docs describe running 'multiple instances or automation' as a normal cost driver. So driving Claude Code headless on a subscription from your own orchestrator is within the product's documented design — what the terms forbid is scripting claude.ai itself, sharing credentials, and reselling.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "inferred",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "Claude Code subscription limits are a dual-layer system: a 5-hour rolling window plus a weekly cap on active compute hours, with Claude Code, Claude chat and Cowork sharing ONE pool. Anthropic's stated reason for introducing weekly caps was a small number of users running Claude Code essentially 24/7, account sharing, and unauthorised reselling. On 2026-05-06 Anthropic permanently doubled the 5-hour limits for Pro/Max/Team/seat-based Enterprise and removed peak-hour throttling for Pro and Max.",
+   "source_url": "https://www.truefoundry.com/blog/claude-code-limits-explained",
+   "confidence": "community-report",
+   "date_of_source": "2026; fetched 2026-09-13"
+  },
+  {
+   "claim": "Claude Code exposes rate-limit recovery for unattended runs: `autoContinueAtUsageLimit` (managed setting) and, on v2.1.234+, the ability to wait and continue the interrupted task automatically after the window resets. An arena should either set this OR treat a usage-limit hit as an explicit run outcome rather than a task failure.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "fetched 2026-09-13"
+  },
+  {
+   "claim": "OpenAI's position on Codex automation: ChatGPT sign-in draws on your plan's included usage and its 5-hour rolling limit, shared across Codex CLI, the web app and the IDE extension; OpenAI's own docs steer automation elsewhere — 'API-key usage is best for local workflows, CI/CD jobs, programmatic Codex CLI workflows, SDK usage, and automation in shared engineering environments' and 'Sign-in suits interactive daily coding; API keys suit CI, automation, and scripted runs.' With an API key, usage bills to the Platform account at API rates, not your ChatGPT plan.",
+   "source_url": "https://developers.openai.com/codex/pricing",
+   "confidence": "community-report",
+   "date_of_source": "2026; fetched 2026-09-13 via search aggregation of help.openai.com article 11369540 (403 to direct fetch)"
+  },
+  {
+   "claim": "Pat201492/dungeonworks is a well-suited corpus source: private, Python-primary (5.27 MB Python), 141 closed issues, 120 merged PRs of which 112 have a closingIssuesReferences link, `pyproject.toml` with `[tool.pytest.ini_options]` (testpaths = tests + dmserver/tests, asyncio_mode=auto, addopts = \"-m 'not llm and not bench' --strict-markers\", markers llm/slow/bench), a Makefile whose `test` target is literally `python -m pytest -q`, and NO .github/workflows directory (no CI to fight with). Sampled merged PRs add test files alongside source: #293 = 3 files changed / 1 test file, #246 = 5 files / 1 test file, #233 = 13 files / 3 test files.",
+   "source_url": "https://github.com/Pat201492/dungeonworks",
+   "confidence": "verified-source-code",
+   "date_of_source": "queried via gh CLI 2026-09-13"
+  },
+  {
+   "claim": "dungeonworks' pytest markers give you free flake control: `llm` tests require a live inference endpoint and `bench` tests assert absolute wall-clock budgets — both are deselected by default via addopts. An arena must keep that default deselection (never run -m llm in grading) or every task will be nondeterministically red.",
+   "source_url": "https://github.com/Pat201492/dungeonworks/blob/main/pyproject.toml",
+   "confidence": "verified-source-code",
+   "date_of_source": "queried via gh CLI 2026-09-13"
+  }
+ ],
+ "exact_commands_or_apis": [
+  "# --- Claude Code adapter (subscription lane; cost proxy + hard caps) ---",
+  "claude -p \"<task prompt>\" --output-format json --max-budget-usd 1.50 --max-turns 40 --permission-mode acceptEdits --permission-prompts none --model sonnet --add-dir <worktree>",
+  "# JSON result fields to record: .total_cost_usd, .num_turns, .duration_ms, .duration_api_ms, .is_error, .session_id, .result, .permission_denials, per-model cost breakdown",
+  "claude -p \"...\" --output-format json | jq '{cost:.total_cost_usd, turns:.num_turns, ms:.duration_ms, err:.is_error, sid:.session_id}'",
+  "# Reproducible/CI lane (NOTE: --bare does NOT use subscription login; needs ANTHROPIC_API_KEY)",
+  "claude --bare -p \"...\" --allowedTools \"Bash,Read,Edit,Write\" --output-format json",
+  "# Streaming lane for live token accounting; last line is the result message",
+  "claude -p \"...\" --output-format stream-json --verbose --include-partial-messages",
+  "# Structured verdict extraction (use for the LLM-judge stage)",
+  "claude -p \"<judge prompt>\" --output-format json --json-schema '{\"type\":\"object\",\"properties\":{\"winner\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"winner\",\"reason\"]}' | jq '.structured_output'",
+  "# --- Codex CLI adapter ---",
+  "codex exec --json --sandbox workspace-write -C <worktree> -m gpt-5-codex -c model_reasoning_effort=medium \"<task prompt>\"",
+  "codex exec --json -o <worktree>/.arena/last_message.txt --output-schema <schema.json> \"<task prompt>\"",
+  "codex exec resume <SESSION_ID> --last",
+  "# cost must be derived: parse JSONL turn-completion events for token counts x local price table (no --max-budget-usd equivalent)",
+  "# --- OpenCode + local model adapter ---",
+  "opencode run \"<task prompt>\" --model ollama/qwen2.5-coder:7b-16k --format json",
+  "# ~/.config/opencode/opencode.json: provider.ollama.options.baseURL = http://localhost:11434/v1 ; num_ctx >= 16384 (2048/4096 default silently truncates)",
+  "# --- Isolation primitives (Windows) ---",
+  "git worktree add ../arena-wt/<run_id> <base_commit_sha> --detach",
+  "git worktree remove ../arena-wt/<run_id> --force",
+  "git worktree list --porcelain",
+  "# --- Corpus extraction from dungeonworks merged PRs (all read-only) ---",
+  "gh pr list -R Pat201492/dungeonworks --state merged --limit 500 --json number,title,mergedAt,mergeCommit,baseRefOid,additions,deletions,changedFiles,closingIssuesReferences",
+  "gh pr view <N> -R Pat201492/dungeonworks --json files --jq '[.files[].path | select(startswith(\"tests/\"))]'",
+  "gh issue view <ISSUE> -R Pat201492/dungeonworks --json number,title,body,labels,closedAt",
+  "gh api repos/Pat201492/dungeonworks/pulls/<N> --jq '{base:.base.sha, head:.head.sha, merge:.merge_commit_sha}'",
+  "gh pr diff <N> -R Pat201492/dungeonworks --patch",
+  "# FAIL_TO_PASS derivation: at base.sha apply ONLY the PR's tests/** paths, run pytest, record failures; at merge_commit_sha run same node ids, record passes",
+  "git -C <worktree> checkout <base_sha> -- .",
+  "git -C <worktree> checkout <merge_sha> -- tests/",
+  "python -m pytest -q --json-report --json-report-file=.arena/f2p.json <node_ids>",
+  "# PASS_TO_PASS = the repo's default green suite at base_sha (markers already exclude flakes)",
+  "python -m pytest -q   # == `make test`; addopts already apply -m 'not llm and not bench' --strict-markers",
+  "# --- Reference harness CLIs worth copying / running ---",
+  "hal-eval --benchmark swebench_verified_mini --agent_dir agents/my_agent/ --agent_function main.run --agent_name \"Claude Code (sonnet)\" -A model_name=... --max_concurrent 5",
+  "tb run --agent terminus --model anthropic/claude-3-7-latest --dataset-name terminal-bench-core --dataset-version 0.1.1 --n-concurrent 8 --n-attempts 3",
+  "tb run --agent-import-path arena.adapters.claude_code:ClaudeCodeAgent --task-id <id> --livestream",
+  "tb datasets list",
+  "mini-extra swebench --model anthropic/claude-sonnet-4-5 --subset verified --split test --workers 4 --slice '0:20' --filter '<regex>' -o runs/",
+  "python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-Bench_Verified --predictions_path preds.jsonl --max_workers <N>",
+  "./benchmark/benchmark.py <run-name> --model <m> --edit-format diff --threads 10 --exercises-dir polyglot-benchmark --num-tests 50 --tries 2",
+  "./benchmark/benchmark.py --stats <benchmark-dir>",
+  "omnigent run <agent.yaml>   # executor swap: `harness: claude-sdk` -> `harness: codex` -> `harness: opencode`",
+  "# Omnigent budget policy block (copy this shape for your arena's per-task cap):",
+  "policies:\\n  session_budget:\\n    type: function\\n    handler: omnigent.policies.builtins.cost.cost_budget\\n    factory_params:\\n      max_cost_usd: 1.50\\n      ask_thresholds_usd: [1.00]",
+  "# Terminal-Bench adapter contract to mirror in your own arena:",
+  "class MyAgent(BaseAgent):\\n    @staticmethod\\n    def name() -> str: ...\\n    def perform_task(self, instruction: str, session: TmuxSession, logging_dir: Path | None = None) -> AgentResult: ...",
+  "# AgentResult fields: total_input_tokens:int, total_output_tokens:int, failure_mode:FailureMode, timestamped_markers:list[tuple[float,str]]",
+  "# --- Paths on this machine ---",
+  "C:\\\\Users\\\\pegan\\\\dev\\\\claude-study-room",
+  "C:\\\\Users\\\\pegan\\\\dev\\\\claude-study-room\\\\CLAUDE.md",
+  "C:\\\\Users\\\\pegan\\\\dev\\\\claude-study-room\\\\config.json",
+  "C:\\\\Users\\\\pegan\\\\dev\\\\claude-study-room\\\\src",
+  "C:\\\\Users\\\\pegan\\\\dev\\\\claude-study-room\\\\test",
+  "C:\\\\Users\\\\pegan\\\\dev\\\\claude-study-room\\\\budget-smoke.ts",
+  "C:\\\\Users\\\\pegan\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-pegan\\\\cca160bc-058f-4947-b24f-5e5c7e639ed8\\\\scratchpad"
+ ],
+ "policy_notes": [
+  "Anthropic Consumer Terms, verbatim: 'Except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it, to access the Services through automated or non-human means, whether through a bot, script, or otherwise.' (https://www.anthropic.com/legal/consumer-terms). The 'where we otherwise explicitly permit it' clause is what covers Claude Code: Anthropic's own docs ship `claude -p`, scheduled tasks, /loop and Remote Control as first-class subscription features and describe 'running multiple instances or automation' as a normal cost driver. Driving the official Claude Code binary headless is materially different from scripting claude.ai.",
+  "Hard lines in the same terms that an arena must not cross: no sharing account login/credentials, no making your account available to anyone else, no reselling the Services, no using outputs to train competing models. An arena that runs only on your own machine under your own login is fine on all four.",
+  "Claude Code `--bare` — the flag Anthropic recommends for scripted/SDK calls and says will become the `-p` default — explicitly does NOT read OAuth credentials or the system keychain and requires ANTHROPIC_API_KEY. Read this as a directional signal: Anthropic is steering scripted/reproducible runs onto the API lane. Design your arena so the Claude Code adapter can run in EITHER lane (subscription for cheap exploratory sweeps, API key for the archival/publishable run) via one env switch.",
+  "Claude Code subscription limits are a 5-hour rolling window PLUS a weekly cap on active compute hours, and Claude Code, Claude chat and Cowork all draw from ONE shared pool. An arena sweep will therefore eat the same budget you use to actually work. Anthropic explicitly named 'a small number of users running Claude Code essentially 24/7' as the reason weekly caps exist — a naive N=5-repeat × 4-harness × 40-task sweep is exactly that usage shape.",
+  "OpenAI is more explicit than Anthropic: ChatGPT sign-in for Codex draws on the plan's included usage and its 5-hour rolling limit shared across Codex CLI / web / IDE, and OpenAI's own docs say 'API-key usage is best for local workflows, CI/CD jobs, programmatic Codex CLI workflows, SDK usage, and automation in shared engineering environments' and 'Sign-in suits interactive daily coding; API keys suit CI, automation, and scripted runs.' Treat that as the recommended lane for arena runs.",
+  "With an API key, Codex usage bills through the OpenAI Platform account at API rates and does NOT consume ChatGPT plan credits — which is also what makes $/task a real number rather than a proxy.",
+  "On a subscription, the $ figure Claude Code reports is a client-side list-price ESTIMATE, and Anthropic's docs explicitly note that for Pro/Max subscribers 'the session cost figure isn't relevant for billing purposes'. It is still the right cross-harness comparison metric (it is a consistent list-price denominated measure of work done), but label it 'list-price equivalent $', not 'spend'.",
+  "OpenCode + a local Ollama model has no usage policy exposure at all — zero marginal cost, unlimited repeats. This makes it the ideal 'free arm' for validating arena plumbing (task extraction, worktree isolation, grading, statistics) before you spend a single subscription token. Run the full N=5 protocol against OpenCode first; only then spend on the paid arms.",
+  "Nothing in either vendor's terms prohibits COMPARING harnesses or publishing your own measurements of your own usage. The constraints are on credential sharing, bot access to the web products, and reselling — not on benchmarking.",
+  "Practical rather than legal, but decisive at your scale: Claude Code exposes `autoContinueAtUsageLimit` and (v2.1.234+) can wait for a usage window to reset and resume. For an arena, do NOT enable this — a run that sleeps 5 hours silently corrupts your wall-clock metric. Treat a usage-limit hit as a distinct recorded outcome ('budget_exhausted'), excluded from pass-rate denominators, and resume the sweep manually."
+ ],
+ "recommendations": [
+  "ARCHITECTURE — copy Terminal-Bench's adapter contract, not Omnigent's. Define exactly one interface: `run(task: Task, worktree: Path) -> RunResult` where RunResult = {patch: str, passed_f2p: bool, passed_p2p: bool, input_tokens: int, output_tokens: int, cost_usd_listprice: float, turns: int, wall_clock_s: float, failure_mode: Enum, log_path: Path}. Four adapters shell out and parse: ClaudeCodeAdapter (`--output-format json` → .total_cost_usd/.num_turns), CodexAdapter (`--json` JSONL → token counts × local price table), OpenCodeAdapter (`--format json`, cost 0 for local), MiniSweAgentAdapter (the ~100-line bash-only control arm that isolates model capability from harness engineering). Omnigent is the right thing to STUDY for adapter naming and the policy engine, but it has no scoring layer at all and its Windows sandbox is Job-Object-only — don't take a dependency on it.",
+  "TASK CORPUS — build ~40 tasks from dungeonworks using the SWE-bench recipe, automated à la SWE-gen. For each of the 112 merged PRs with a closingIssuesReferences link: (a) take base.sha as the starting state, (b) the issue title+body as the ONLY prompt (never show the diff), (c) checkout just the PR's `tests/**` paths from the merge commit to get FAIL_TO_PASS node ids, (d) the repo's default green suite at base.sha as PASS_TO_PASS. Validate each candidate by confirming F2P actually fails at base and passes at merge — discard any that don't, and any where the tests carry the `llm` or `bench` markers. Your sampled PRs confirm this works (#293: 3 files/1 test; #233: 13 files/3 tests). Stratify the final 40 by diff size (small ≤2 files / medium 3-6 / large 7+) and by area label so a harness can't win by being good at only one shape.",
+  "GRADING — three tiers, because METR proved tests alone over-credit by ~24pp. Tier 1: hidden tests (F2P + P2P) → binary resolved. Tier 2: a rubric LLM judge scoring the patch against the ISSUE TEXT, not the human diff (κ=0.75 rubric vs κ=0.39 golden-patch-as-reference), with discrete binary checks: solves stated problem / no unrelated changes / follows repo conventions per CLAUDE.md / no dead code / tests are meaningful. Tier 3: blind pairwise — two harnesses' patches for the same task, presented anonymised in BOTH orderings, judged by a model from a different family than either generator. Aggregate the pairwise votes with Bradley-Terry MLE + 100-resample bootstrap CIs exactly as LMArena does. With 40 tasks × 4 harnesses you get 240 unordered pairs × 2 orderings = 480 judgments, which is plenty for a stable BT fit and is cheap (judging is one short call per pair).",
+  "METRICS — record a vector per (harness, task, seed), never a scalar. Primary: resolved (F2P∧P2P). Secondary: cost_usd_listprice, input/output tokens, turns, wall_clock_s, diff_size (files+lines), judge_rubric_score, pairwise_wins. Derived headline: the accuracy-vs-$ Pareto frontier (HAL/AI-Agents-That-Matter), plus $/resolved-task = total spend ÷ tasks resolved, which is the number that actually decides which harness your issue→PR engine should use. Report Pass@1 (mean per-trial), Pass@3 (any trial), and Pass^3 (ALL trials) — for an unattended engine Pass^3 is the metric that predicts reality, and it's the one a single-run leaderboard hides.",
+  "STATISTICS — with N=40 tasks you MUST use paired comparisons or you will measure noise. Published run-to-run SD on this kind of corpus is 2.0-3.4pp over 5 repeats, which is the same magnitude as real harness differences. So: (1) every harness runs the SAME 40 tasks with the same seeds; (2) compare within-task score differences, not marginal means — SE_paired = sqrt(Var(s_A−B)/n) over per-task deltas, which Anthropic's 'Adding Error Bars to Evals' shows is a free variance reduction because per-task scores correlate 0.3-0.7 across models; (3) bootstrap-resample TASKS (not runs) 10,000× and report 95% CIs; (4) cluster by task when you have k repeats per task. Run N=3 repeats for the ranking pass and N=5 only for the top-2 finalists — that is where the marginal information actually is. State up front: if the paired CI for A−B straddles zero, the honest answer is 'no detectable difference, pick on cost'.",
+  "ISOLATION on Windows — git worktree per run (detached at base.sha) is the file-isolation layer, and it is natively supported by Claude Code, Codex and Cursor. But worktrees do NOT isolate ports, databases, or external accounts — and dungeonworks binds DW_PORT 8900 / DW_SERVER_PORT 8901. So: per-run, allocate a port offset from the run index and inject it via .env, point DW_DATA_DIR at a per-run temp dir, and force `-m 'not llm and not bench'` so no test reaches Ollama or asserts wall-clock. Keep concurrency at 2-3 (not 8) — you're on one desktop and above ~4 concurrent agents the community consensus is you need one container per worktree. Skip the SWE-bench Docker image pyramid entirely (120GB, 3 layers, 8CPU/16GB Docker Desktop minimum); build ONE Dockerfile for dungeonworks if you later want true isolation.",
+  "BUDGET CONTROL — this is where most of these projects would bankrupt you, so make it structural, not a promise. (1) Per-task hard cap via Claude Code's native `--max-budget-usd 1.50 --max-turns 40`; subagent spend counts toward the cap and it stops background subagents on breach. Codex has no equivalent so enforce it in your runner by killing the process when parsed cumulative tokens cross the threshold. (2) Per-sweep cap: compute projected spend = tasks × harnesses × repeats × cap BEFORE launching, refuse to start above a configured ceiling, and print it. (3) Sampling ladder: smoke (4 tasks × 1 repeat) → ranking (40 × 3) → finalist (40 × 5, top-2 only). Never run the full matrix first. (4) Run the entire protocol end-to-end on the OpenCode+Ollama arm first at zero cost to debug the plumbing. (5) Cheap-judge policy: use a small/fast model for the rubric and pairwise stages — it's ~480 short calls and should be <5% of total spend. (6) Log cumulative spend to a JSONL ledger after every single run so an interrupted sweep is resumable and you always know the number.",
+  "RUN HYGIENE — pin reproducibility the way Aider and Terminal-Bench do. Write a run-lock (à la tb.lock) capturing: harness versions (`claude --version`, `codex --version`), model ids, all adapter flags, the corpus commit, and the task list hash. Use `--bare` for the archival run so hooks/MCP/CLAUDE.md discovery can't drift between machines — and note the security angle: without --bare, `claude -p` executes a project's .claude/settings.json hooks and connects .mcp.json servers with no trust dialog, and your arena checks out historical repo states into worktrees. Record 'budget_exhausted' and 'usage_limit' as distinct outcomes excluded from pass-rate denominators, never as failures. Do NOT enable autoContinueAtUsageLimit — a run that silently sleeps 5 hours destroys your wall-clock metric.",
+  "SCOPE DISCIPLINE — do not build a general benchmark. Build the smallest thing that answers one question: 'for MY repo's issue shapes, which (harness, model) resolves the most issues per dollar at acceptable review quality?' Concretely that's ~600 lines: a corpus builder (gh + pytest), four thin adapters, a worktree runner, a grader, and a stats/plot script. HAL, Terminal-Bench and mini-swe-agent are all worth reading as source, but installing any of them costs you more in environment wrangling on Windows than writing the adapters. The one external dependency genuinely worth it is mini-swe-agent as a control arm — it's the published minimal-harness baseline (>74% SWE-bench Verified, bash-only) and gives you a reference point for 'how much is the harness actually adding?'",
+  "WHAT TO MEASURE FIRST — before any harness comparison, measure the corpus itself. Run the oracle (human merge commit) through your grader: every task should score resolved=true and judge=pass. Any task that doesn't is a broken task, not a hard one. This is the Task Validity half of the ABC checklist ('solvable iff the agent has the target capability') and it is the single highest-ROI step — ABC found flaws like this mis-estimate agent performance by up to 100% in relative terms, and SWE-bench Verified itself was found to use insufficient test cases. Also run one deliberately empty patch through the grader to confirm it fails (TAU-bench counted empty responses as successes)."
+ ],
+ "unknowns": [
+  "Whether Claude Code's `--max-budget-usd` actually halts a run when authenticated via SUBSCRIPTION rather than an API key. The docs describe it as 'maximum dollar amount to spend on API calls' and separately say the session cost figure is a local list-price estimate that 'isn't relevant for billing purposes' for Pro/Max. Verify locally: `claude -p \"count to 200 slowly, one number per message\" --max-budget-usd 0.05 --output-format json` and check whether it terminates with a budget error and what .total_cost_usd reads.",
+  "The exact event type names and token-usage field paths in `codex exec --json` JSONL output. Official docs confirm the stream exists and carries token counts on turn-completion events but do not publish the schema. Verify locally: `codex exec --json \"print hello\" | jq -c 'select(.type != null) | {type}' | sort -u` then inspect the turn-completion event in full.",
+  "Whether Terminal-Bench's current release still uses the exact `BaseAgent.perform_task(instruction, session, logging_dir)` signature — the project appears to have moved under a 'harbor-framework' org with a 2.0/4.0 dataset line, so the v1 source I read may be stale. Verify: `pip download terminal-bench` and read terminal_bench/agents/base_agent.py, or check the harbor-framework repo.",
+  "Whether OpenCode's `--format json` payload includes token counts / cost fields, or only the text result. The Ollama integration docs confirm the flag exists but not the schema. Verify: `opencode run \"hi\" --model ollama/<tag> --format json | jq 'keys'`.",
+  "HAL's per-configuration repeat count and whether hal-harness computes any confidence intervals — the ICLR paper explicitly does not report CIs, bootstrap, or repeat counts. Verify by reading princeton-pli/hal-harness source for the results aggregation code, or just treat it as a gap you close yourself.",
+  "Exact ABC checklist line items (task-validity and outcome-validity sub-criteria, and its specific benchmark-reporting requirements around CIs/run counts/cost). The abstract confirms the three categories but arXiv's abstract page doesn't enumerate them; fetch the full PDF at https://arxiv.org/pdf/2507.02825 and read the checklist tables.",
+  "OpenAI's help-center article 'Using Codex with your ChatGPT plan' (help.openai.com/en/articles/11369540) returned HTTP 403 to automated fetch, so the automation/CI guidance is quoted from developers.openai.com/codex/pricing and search aggregation rather than read directly. Open it in a browser to confirm the exact wording before relying on it.",
+  "OpenAI's index page for SWE-bench Verified returned HTTP 403, so the '500 human-annotated samples' construction detail is secondary-sourced. Confirm via the SWE-bench docs site (swebench.com) or the openai/SWE-bench-verified dataset card.",
+  "Whether dungeonworks' 112 issue-linked merged PRs actually yield valid FAIL_TO_PASS sets at scale. The three PRs I sampled all add test files, but the conversion rate across all 112 is unknown — some PRs will be docs/ADR-only (e.g. #292 and #289 are ADRs) and some tests will already pass at base. Verify by running the extractor in dry-run mode over all 112 and counting survivors before designing the sweep. Expect 40-70 valid tasks.",
+  "Whether dungeonworks' test suite is deterministic enough at base commits from months ago — dependency drift (pyproject has [skin,dev,server,tagger] extras, one pulling ~2GB of torch) may make old base commits un-installable. Verify by picking the 5 oldest candidate PRs and confirming `pip install -e '.[dev]'` + `python -m pytest -q` goes green at each base.sha.",
+  "How much of your weekly Claude Code allowance one full sweep consumes. There is no published tokens-per-active-compute-hour conversion. Verify empirically: run the 4-task smoke sweep, then check `/usage` (press 'w' for the 7-day view) before and after, and extrapolate linearly before committing to the 40-task run."
+ ]
+}

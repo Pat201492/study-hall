@@ -1,0 +1,265 @@
+{
+ "key": "siblings",
+ "summary": "Four sibling tools sit beside claude-study-room in C:\\Users\\pegan\\dev, and each already solves one piece of what a Study Room v2 + harness arena needs. **pr-loop** (`prloop.js`, 479 lines, zero deps) is the smallest complete agent harness: it spawns `claude -p --output-format stream-json` and renders a live per-agent feed of text + tool calls, drives builder/reviewer in two git worktrees, and uses the PR itself as the message bus with a `VERDICT: APPROVED|CHANGES_REQUESTED` comment protocol. **claude-chatroom** (`chatroom.js` + `setup.js`) is the only sibling on the raw API (`@anthropic-ai/sdk`, requires `ANTHROPIC_API_KEY`); it contributes an interactive readline wizard that emits a self-contained JSON room config, two scheduler policies (free-for-all vs lead-directed with a `NEXT: <name>` floor directive), streaming turn rendering, and a non-blocking human-interjection queue — the closest existing thing to an interactive planning terminal. **claude-queue-runner** is the mature ops shell: TS/tsx no-build, `gh` as the only GitHub client, GitHub labels as the state machine, a pure `classify()` queue, `runClaude()` with usage-limit detection and 15-minute pause, a `Stats` class writing `status.json`/`stats.json` snapshots, a `--plan` mode where one Claude authors the whole dependency-ordered issue list, and a ~1,200-line `dashboard.ts` on port 4600 that owns the runner as a child process and exposes `/api/{status,log,board,start,stop,plan-text,config,gh-status,gh-login,automerge,reviewmode}`. **app-testing-agent** contributes the only real versioned cross-repo data contract in the portfolio: `EXPORT_SCHEMA = 'app-testing-agent/export/v1'`, a read-only side-effect-free `export` command emitting one envelope, `--json` mode where stdout is payload and stderr is progress, documented exit codes and timeouts, and an explicit \"additive keeps v1, breaking bumps v2\" rule pinned by a test. Study Room already consumes that contract via `src/testingAgent.ts` (shell out to the CLI, never import modules or read `state/*.json`), and already has an arena seam of its own — `src/harness.ts` / `harnesses.ts` / `claudeCodeHarness.ts` / `openCodeHarness.ts` with declared, inspectable capabilities and a usage store (`~/.claude-study-room/usage.jsonl`) carrying a per-row `fidelity` so two harnesses' costs are never wrongly pooled. The study book's cross-cutting verdict is that these repos share one engineering fingerprint (pure core / impure edges, GitHub-as-database, CLI-login not API key, zero-build Node) and seven recurring defects a v2 must avoid.",
+ "facts": [
+  "pr-loop is two files with no package.json, no tests, no npm deps, and the directory is not a git repo (C:\\Users\\pegan\\dev\\pr-loop\\prloop.js, 479 lines; STUDY_BOOK.md:1874)",
+  "pr-loop agent spawn flags are exactly: `claude -p --output-format stream-json --verbose --permission-mode bypassPermissions --append-system-prompt <sys> --model <model> --strict-mcp-config --disallowedTools WebSearch WebFetch`, with env `CAVEMAN_DISABLE=1`, prompt written to stdin then closed (prloop.js:100-112)",
+  "pr-loop's live feed does manual newline framing on stdout, JSON.parse per line, printing `assistant` text blocks and `tool_use` as `→ Tool(arg)` via shortInput(), and captures the `result` event's text (prloop.js:85-93, 118-141)",
+  "pr-loop resolves the agent promise on close even with a non-zero exit code if a result was captured; it only rejects when code!==0 AND no result (prloop.js:148-152)",
+  "pr-loop `--log <file>` monkey-patches process.stdout.write to mirror ANSI-stripped output into a file so an external window shows it live and a watcher can tail it (prloop.js:62-70)",
+  "pr-loop verdict protocol: PR comment body matched by /VERDICT:\\s*(APPROVED|CHANGES_REQUESTED)/i, read via `gh pr view <n> --json comments`; progress detected by comparing verdict-comment COUNT before/after the reviewer runs; last matching comment wins (prloop.js:284-294, 318-332; duplicated at 378-387, 402-416)",
+  "pr-loop worktree choreography: builder `git worktree add -b <branch> <wt> <base>`; reviewer `git worktree add --detach <wt> <base>` then every round `git fetch origin <branch>` + `git checkout --detach origin/<branch>` (prloop.js:300-302, 319-321). Backlog mode instead uses `git worktree add -B <branch> <wt> origin/<branch>` (prloop.js:394)",
+  "pr-loop flags: --repo, --task (repeatable), --task-file, --pr, --prs, --backlog, --base, --branch, --rounds (default 4), --model (default sonnet), --keep, --yes/-y, --log, --test-cmd, --prewarm (repeatable) (prloop.js:26-50)",
+  "pr-loop `--prewarm <dir>` creates a Windows directory junction via symlinkSync(src, dst, \"junction\") — shared storage, an agent writing there mutates the real repo dep dir (prloop.js:205-212; README.md:91-93)",
+  "pr-loop create mode is build-first (BUILDER then REVIEWER, prloop.js:305-333); backlog mode is review-first (REVIEWER then BUILDER only if changes requested and rounds remain, prloop.js:399-422)",
+  "pr-loop preflight: `git rev-parse --is-inside-work-tree`, `git remote get-url origin`, `gh auth status`; auth is CLI-login only, no API key (prloop.js:175-183)",
+  "pr-loop result records are `{label, prNum, approved, url, error?}` and the summary prints `X/N approved` (prloop.js:447, 472-479)",
+  "pr-loop is wrapped by two slash commands: C:\\Users\\pegan\\.claude\\commands\\pr-loop.md and pr-loop-backlog.md; they launch it in a visible PowerShell window via `Start-Process powershell -NoExit`, deliberately WITHOUT --yes so the human confirms in the window, then poll the --log file for markers ('Reviewer approved|Did not reach approval|Fatal|no new verdict') (pr-loop.md:24-49)",
+  "claude-chatroom is the ONLY sibling using the raw API: `import Anthropic from '@anthropic-ai/sdk'` and it exits if ANTHROPIC_API_KEY is unset (chatroom.js:13, 35-38; package.json deps: @anthropic-ai/sdk ^0.39.0, chalk ^5.3.0)",
+  "chatroom room config shape: {model (default 'claude-sonnet-4-6'), maxTokensPerTurn: 300, turnDelayMs: 700, scheduler: 'free'|'lead', topic, agents[]} where each agent is {name, color, persona, role, roleLabel, roleSnippet, isLead} (setup.js:134-141; chatroom.js:54-58; README.md:70-73)",
+  "chatroom lead-directed scheduling: the lead's message must end with `NEXT: <name>` or `NEXT: anyone`, parsed by /NEXT:\\s*([^\\n]+)\\s*$/im; after a worker speaks the floor returns to the lead; a human message resets the floor to the lead (chatroom.js:142-165, 214-217)",
+  "chatroom human interjection is non-blocking: a readline 'line' listener pushes into a `pending[]` queue, echoed as 'Moderator (queued)', and flushHuman() drains it into the transcript before the next turn is scheduled (chatroom.js:168-187, 211)",
+  "chatroom rebuilds the ENTIRE transcript as plain `Speaker: text` lines into each turn's user message with no truncation or caching (chatroom.js:92-95, 101-104) — cost grows quadratically with turns",
+  "chatroom setup wizard helpers: `ask(q, def)` and `pickIndex(q, items, def)` over node:readline/promises, preset personalities/roles from presets.json, single-lead enforcement, auto-promotion of agent 0 when scheduler='lead' but no lead chosen, and optional save-to-file (setup.js:19-30, 102-107, 127-132, 151-156)",
+  "claude-queue-runner stack: Node>=20, TypeScript run via tsx with NO build step; the only runtime dependency is tsx; scripts are start/plan/audit/dry/once/stats/debug/dashboard/test/typecheck (claude-queue-runner/package.json)",
+  "claude-queue-runner runClaude() spawns `<claudeBin> -p --output-format json [--dangerously-skip-permissions | --permission-mode <mode>] [--model <m>]` with shell:true, windowsHide:true, prompt over stdin, cwd = the job worktree (src/claude.ts:54-67)",
+  "ClaudeResult shape: {ok, tail, logFile, tokens, costUsd, limited}; tokens = input+output+cache_creation+cache_read summed from the JSON `usage` (src/claude.ts:7-14, 33-37, 78-94)",
+  "Usage-cap handling: LIMIT_RE = /hit your (?:session|usage) limit|limit\\s*·?\\s*resets|usage limit reached|approaching .*usage limit/i; armPause() sets a fixed 15-minute global `limiter.pausedUntil` (no timezone parsing, deliberately); a capped run is forced ok=false so nothing merges off it (src/claude.ts:20-31, 91-94)",
+  "claude-queue-runner types: Action kinds are MERGE|RESOLVE|PROMOTE|FIX|REVIEW|IMPLEMENT; RunnerConfig carries reviewModel/writeModel/reviewMode (A–E) and specPath; LabelSet includes `reviewedOk` because self-authored PRs cannot be GitHub-approved (src/types.ts:1-56)",
+  "Stats writes two persisted files under ~/.claude-queue-runner/<owner-repo>/: stats.json (all-time Totals) and status.json (per-cycle snapshot), plus categorises kinds into writer/reviewer/planner so avgWriteSec and avgReviewSec are reported separately (src/stats.ts:10-13, 61-66, 119-133, 162-183)",
+  "status.json snapshot contains {updatedAt, stopped, running:{writers,reviewers,planners,total,instances:[{id,kind,category,label,startedMs,startedAt,aliveSec}]}, session, allTime, attention} — startedMs is absolute so the browser ticks the timer itself (src/stats.ts:164-181)",
+  "Queue-runner dashboard: port from `DASHBOARD_PORT` (default 4600), config file from `RUNNER_CONFIG` (default config.json), theme from `DASHBOARD_THEME=blue` implemented as a runtime hex→hex string replacement across the served HTML (src/dashboard.ts:15-36)",
+  "Dashboard owns the runner as a child: `spawn('npx', ['tsx','src/index.ts','--config',CFG,...flag], {shell:true})` with flag from mode plan|dry|once|audit; stop uses `taskkill /PID <pid> /T /F` on win32 to kill spawned claude grandchildren (src/dashboard.ts:83-93, 117, 125)",
+  "Dashboard can also detect and stop a runner started OUTSIDE it by reading runner.lock and probing liveness with `process.kill(pid, 0)` (src/dashboard.ts:44-59, 113-121)",
+  "Dashboard HTTP endpoints: /api/status, /api/log, /api/board, POST /api/start, POST /api/stop, POST /api/plan-text, POST /api/config, /api/gh-status, POST /api/gh-login, POST /api/automerge, POST /api/reviewmode (src/dashboard.ts:643-692)",
+  "Dashboard 'plan from typed description' writes the typed text to plan-input.md and runs `--plan --spec <path>`, so a spec need not be committed in the target repo (src/dashboard.ts:97-110)",
+  "GitHub account linking from the dashboard: `gh api user -q .login` for status, and `gh auth login --web --git-protocol https` launched in a detached terminal for linking (src/dashboard.ts:136-158)",
+  "claude-queue-runner PLAN mode (src/plan.ts) spawns ONE claude in a clone with a planner prompt that: creates one-PR-sized issues via `gh issue create -R <repo>`, body = '## Goal / ## Deliverables / ## Acceptance' + a final 'Depends on: #N, #M' line, labels ready (no deps) or blocked (deps) plus 'milestone', creates foundational issues first so numbers exist, writes NO code and opens NO PRs (src/plan.ts:24-44); it pre-creates the 'milestone' label with `gh label create ... --force` (src/plan.ts:16)",
+  "claude-queue-runner permission-mode table is load-bearing: `acceptEdits` (the default) can edit files only, so jobs can never push/PR and never finish; `bypassPermissions` maps to --dangerously-skip-permissions and is the only mode where jobs complete (README.md:149-167)",
+  "app-testing-agent export contract constant: `export const EXPORT_SCHEMA = 'app-testing-agent/export/v1'` (src/exportState.ts:32)",
+  "Envelope shape: {schema, agentVersion, generatedAt, sections: ('runs'|'hygiene'|'revamp')[], runs: {summary, runs[]}|null, hygiene: HygieneReport|null, revamp: RevampReport|null} (src/exportState.ts:69-87)",
+  "Contract's null semantics: a requested-but-never-run section is `null`, NOT omitted, so a consumer can render 'no scan yet' instead of treating absence as an error; 'in sections + null' vs 'not in sections' mean different things (src/exportState.ts:76-81, 168-183; docs/INTEGRATION.md:73-80)",
+  "`runs.summary` is computed AFTER --limit is applied, so a consumer never shows '3 of 25 failing' about rows it cannot see; default limit is 200, repo filter is case-insensitive (src/exportState.ts:146-160; docs/INTEGRATION.md:81)",
+  "CLI surface: `npx tsx src/cli.ts export [--sections runs,hygiene,revamp] [--repo r] [--limit n] [--compact]`; unknown section or bad limit exits 2; output is a single JSON object on stdout with indent 2, or 0 with --compact; exit 0 (src/cli.ts:373-396, 405; src/exportState.ts:187-197)",
+  "Exit codes: 0 = worked, 1 = failed EXCEPT `hygiene` without --json where 1 means 'findings found' (a CI gate), 2 = bad arguments or a missing required tool such as gh. With --json the exit code answers only 'did the command work' (docs/INTEGRATION.md:109-116)",
+  "With --json, stdout carries the payload and NOTHING else; all human progress goes to stderr; a FAILED revamp still answers in the contract shape `{ok:false, error}` so consumers parse one thing either way (docs/INTEGRATION.md:94-106)",
+  "Documented timeouts: export 30s, revamp 10 min, hygiene 15 min, file-issues 5 min (docs/INTEGRATION.md:169-174)",
+  "Explicitly NOT covered by the contract: screenshots and markdown reports are absolute paths on the producing machine, not payloads; there is no push/notification (poll `export`); there is no concurrency control (two hygiene runs both write state/hygiene.json) (docs/INTEGRATION.md:176-180)",
+  "Versioning rule: additive changes (new optional field, new section) keep v1; anything that could break a consumer bumps to v2 and changes EXPORT_SCHEMA, with a test pinning the current value so the bump is deliberate (docs/INTEGRATION.md:182-184)",
+  "Study Room's consumer of that contract is C:\\Users\\pegan\\dev\\claude-study-room\\src\\testingAgent.ts: AGENT_SCHEMA constant (line 29), READ_TIMEOUT_MS 30_000 (32), REVAMP_TIMEOUT_MS 10*60*1000 (34), SAFE_URL_RE (41), agentReady() probes for src/cli.ts rather than just the directory (100-102)",
+  "runAgentCli() runs `execFile('npx', ['tsx','src/cli.ts', ...args], {cwd: path, timeout, maxBuffer: 32MB, shell: process.platform === 'win32'})` and NEVER throws — failures come back as `{ok,stdout,stderr,error}` data (src/testingAgent.ts:113-137)",
+  "parseEnvelope() is a pure validator returning {ok:true,envelope} | {ok:false,error}; a schema mismatch names BOTH versions in the error ('this dashboard understands X, the agent produced Y') so the fix is obvious (src/testingAgent.ts:146-170)",
+  "RevampState deliberately has three distinct states: configured:false (no path set), revamp:null (configured but never run), and error (unreachable or schema mismatch) (src/testingAgent.ts:73-84, 178-199)",
+  "Study Room config key for the sibling is `testingAgent?: { path: string }` (src/config.ts:110)",
+  "Study Room already has the arena seam: src/harness.ts defines HarnessCapabilities {warmSessions, seedableSessions, cacheUsageSplit, toolAllowlist, budgetStop} and Harness {id, capabilities, run(prompt,opts), killAll(), isCapacityError(message)} (src/harness.ts:37-93)",
+  "getHarness(id) THROWS on an unknown id rather than falling back to the default, explicitly so a config typo cannot run the control while claiming to run the experiment (src/harness.ts:137-144); killAllHarnesses() sweeps the whole registry and a throwing harness cannot block the others (155-161)",
+  "fidelityFor(harness) derives UsageFidelity from capabilities.cacheUsageSplit — 'exact' vs 'partial' — so a new adapter cannot claim exact by forgetting to say otherwise (src/harness.ts:105-107)",
+  "src/harnesses.ts is the registration point (registerHarness(claudeCodeHarness); registerHarness(openCodeHarness)) and consumers must import getHarness FROM HERE, not from harness.js, to keep the module graph a DAG and avoid an ESM cycle (src/harnesses.ts:1-31)",
+  "OPENCODE_CAPABILITIES = {warmSessions:true, seedableSessions:false, cacheUsageSplit:true, toolAllowlist:false, budgetStop:false}, each value measured against opencode-ai@1.18.30 running a local Ollama model, not read off a comparison table (src/openCodeHarness.ts:49-92)",
+  "The OpenCode lane cannot ride the Pro/Max subscription (Anthropic compliance; OpenCode removed its Anthropic subscription plugins in v1.3.0), so it means a local model or a metered key; a trivial 'Say OK' run cost 6,472 input tokens before any output, qwen2.5:3b answered in 10.5s, qwen2.5:7b did not finish in 5 minutes twice (src/openCodeHarness.ts:20-32)",
+  "Run history store: ~/.claude-study-room/usage.jsonl, engine-wide (NOT per-repo) with `repo` on every row, because the question 'what does a merged acceptance criterion cost, and does harness B beat A' is asked across repos (src/usageStore.ts:26-31, 103-105)",
+  "UsageRecord fields: {ts, repo, item, role, tier, model, harness, fidelity, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, turns, stoppedBy} (src/usageStore.ts:81-96); UsageFidelity is 'exact'|'partial'|'missing' and a 'missing' row is KEPT with zeroed tokens so the criterion stays in the $/AC denominator (49-57, 120-124)",
+  "Cache-pricing stake behind fidelity: taskCost() prices cache reads at 0.1x base input and cache writes at 1.25x, and across 69 real student sessions 95% of ALL tokens were cache reads — mapping a flat total onto inputTokens inflates a warm session's apparent cost by ~an order of magnitude, enough to reverse the harness verdict (src/usageStore.ts:33-47)",
+  "appendUsage() NEVER throws: a telemetry write must not fail a task whose work is already pushed; errors are logged and swallowed, and the write is synchronous on purpose for ordering (src/usageStore.ts:134-155)"
+ ],
+ "reusable": [
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:98-154",
+   "what": "claude() — a ~55-line streaming headless-agent runner: spawn `claude -p --output-format stream-json`, incremental newline framing across chunk boundaries, per-line JSON.parse with try/catch-continue, render assistant text + `→ Tool(arg)` lines, capture the final `result` event, resolve-on-close that distinguishes 'crashed with nothing' from 'finished messily'",
+   "why_keep": "This is the single best live-feed primitive in the portfolio and exactly what an interactive planning terminal and an arena progress view both need. Study Room's cliStudent.ts uses --output-format json (final result only) and therefore cannot stream; lifting this gives per-turn visibility with no new dependency.",
+   "coupling": "Zero dependencies — node:child_process only. Hard-codes ANSI colour tags and console.log; parameterise the sink (an event callback) and it drops into anything. Also hard-codes --permission-mode bypassPermissions and the --disallowedTools list."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:62-70",
+   "what": "--log: monkey-patch process.stdout.write to mirror every printed line, ANSI-stripped, into a file",
+   "why_keep": "Makes a run watchable in an external terminal AND machine-readable by a watcher at the same time, with 8 lines and no logging library. The pr-loop slash command builds its whole completion detection on it.",
+   "coupling": "None. Global side effect on process.stdout — fine for a CLI, wrong inside a server; a v2 should make it an explicit tee rather than a patch."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:296-333 and 389-422",
+   "what": "The bounded build↔review round loop: hard --rounds cap, per-round verdict-count delta to detect 'reviewer said nothing new', stop-instead-of-loop-blind, and a finally block that force-removes both worktrees",
+   "why_keep": "Two independent infinite-loop guards (round cap + stale-round detection) are exactly the guard shape an arena needs so one wedged harness cannot burn the whole budget. Study Room's watchdog has the same idea at heartbeat granularity; this is the per-task version.",
+   "coupling": "Tightly bound to gh PR comments and git worktrees; the *pattern* (signature/count that must change each round, else stop) is what transfers, not the code."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-chatroom\\setup.js:13-160",
+   "what": "runSetup() — an interactive readline/promises wizard (ask with defaults, pickIndex with validation loop, preset menus, single-lead enforcement, auto-promotion, save-to-JSON) that returns a fully self-contained config object",
+   "why_keep": "This is the closest existing model for 'an interactive planning terminal': a conversation that ends in a durable, reloadable plan file, with the same object returned live and written to disk so `--config room.json` skips the wizard next time. The ask/pickIndex helpers are ~15 lines and reusable verbatim.",
+   "coupling": "chalk for colour and presets.json for the menus; both trivially swappable. No SDK coupling at all — setup.js never touches Anthropic."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-chatroom\\chatroom.js:131-187, 210-226",
+   "what": "Two pluggable turn schedulers (free-for-all: random, never the same speaker twice; lead-directed: lead speaks, emits `NEXT: <name>`, floor returns to lead) plus a non-blocking human-interjection queue drained between turns",
+   "why_keep": "The lead-directed policy is an orchestrator/facilitated-meeting pattern in ~35 lines, and the interjection queue is the mechanism that lets a human steer a running multi-agent session without blocking it — both directly applicable to a planning terminal where the user is the Moderator.",
+   "coupling": "Reads a module-level AGENTS array and mutates a module-level transcript; needs a small refactor to (agents, transcript) -> agent. The `NEXT:` directive is a free-text convention parsed by regex — same fragility class as pr-loop's VERDICT."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\claude.ts:16-31, 91-94",
+   "what": "Usage-limit detection and global pause: LIMIT_RE, armPause() with a fixed 15-minute window (deliberately no timezone parsing), and forcing a capped run to ok=false so nothing merges off it",
+   "why_keep": "A capped run is NOT a job failure; conflating them marks good items runner-error and thrashes the board. Any arena running N harnesses against a plan-limited account needs this, and it needs it PER HARNESS (Study Room's Harness.isCapacityError already declares that seam).",
+   "coupling": "Exports a module-level mutable `limiter` singleton that the main loop reads — global state, but self-contained and easy to make per-harness."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\stats.ts:52-193",
+   "what": "Stats class: live instance registry + dual session/allTime totals, per-category (writer/reviewer/planner) runtimes so a blended average isn't dominated by fast reviews, persisted stats.json, and a status.json snapshot written each cycle with absolute startedMs so the browser ticks its own timers",
+   "why_keep": "This is a complete, working run-history + live-telemetry pattern with zero infra, and the writer-vs-reviewer split is a real insight (writers run ~10x longer). For an arena, swap the category axis from role to harness and most of it is done.",
+   "coupling": "Imports ActionKind from types.js and recentErrors from errors.js; writes to ~/.claude-queue-runner/<repo>/. Both are one-line swaps. Note it does NOT persist per-run rows — Study Room's usage.jsonl is the better primitive for that."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\dashboard.ts:70-158, 643-692",
+   "what": "Control-dashboard shell: own the engine as a child process (so running-state is never phantom), a bounded 800-line log ring, mode buttons mapped to CLI flags, taskkill /T /F tree-kill on Windows, external-runner detection via lockfile + process.kill(pid,0), gh account link row, and a flat `/api/*` JSON surface",
+   "why_keep": "Study Room's own dashboard.ts (60KB) is explicitly derived from this file (see claude-study-room/CLAUDE.md). The child-process-ownership idea and the lockfile liveness probe are the two things that make 'is it running?' answerable, and an arena needs exactly that per lane.",
+   "coupling": "Single 1,200-line file with inlined HTML/CSS/JS, a hex-string colour remap for theming, and duplicated config/lock-path logic. Reuse the server/process-lifecycle half; do not carry the inlined-UI half into v2."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\plan.ts:11-54",
+   "what": "runPlan(): one Claude instance authors the entire dependency-ordered issue list from a spec — '## Goal / ## Deliverables / ## Acceptance' bodies, 'Depends on: #N' lines, ready-vs-blocked labelling, foundational issues created first so their numbers exist, writes no code and opens no PRs",
+   "why_keep": "Plan and build are cleanly separable phases with a human review gate between them: PLAN only emits issues, BUILD only consumes them. That is the exact contract an interactive planning terminal should produce, and the 'create foundational first so referenced numbers exist' rule is a non-obvious correctness detail.",
+   "coupling": "Depends on gh (label create) and runClaude; the prompt itself is the valuable artefact and is pure text. Paired with dashboard.ts:97-110 (startPlanText) which writes typed text to plan-input.md and runs --plan --spec, so the spec need not be committed."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\app-testing-agent\\src\\exportState.ts (whole file) + C:\\Users\\pegan\\dev\\app-testing-agent\\docs\\INTEGRATION.md",
+   "what": "The reference versioned data contract between two repos: one `EXPORT_SCHEMA` constant, one read-only side-effect-free `export` command, an envelope with explicit sections[] and null-means-never-run semantics, summary-computed-after-limit, and a written 'additive keeps v1 / breaking bumps v2, pinned by a test' rule",
+   "why_keep": "This is the only contract in the portfolio that a second repo actually consumes successfully. INTEGRATION.md opens with 'This document is the contract. If you can read this, you can write a consumer without reading the agent's source' — that is the standard a v2 arena↔dashboard boundary should meet.",
+   "coupling": "exportState.ts imports the agent's own ledger/hygiene/revamp loaders, so the module isn't liftable — the PATTERN is what transfers: schema constant + envelope + sections + null semantics + --json stdout-only + documented exit codes/timeouts + a test pinning the version."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\testingAgent.ts (whole file)",
+   "what": "The consumer half of that contract: shell out to the sibling's CLI (never import its modules, never read its state/*.json), mandatory schema check naming both versions, pure parseEnvelope/validateRevampRequest so the contract is unit-tested without spawning, never-throws CliOutcome, three distinct UI states (not-configured / never-run / error), and separate read vs trigger timeouts",
+   "why_keep": "It is already written, already the right shape, and its header comment states the reasoning better than any doc. For an arena consuming several sibling tools, this file is the template to copy per sibling.",
+   "coupling": "Imports only node:child_process, node:fs, node:path and StudyRoomConfig; effectively standalone. Uses `shell: process.platform === 'win32'` for npx, which is why SAFE_URL_RE validation is mandatory rather than defensive."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\harness.ts + harnesses.ts + claudeCodeHarness.ts + openCodeHarness.ts",
+   "what": "The multi-harness seam: declared-and-inspectable HarnessCapabilities (warmSessions, seedableSessions, cacheUsageSplit, toolAllowlist, budgetStop), a registry whose getHarness() throws on an unknown id, killAllHarnesses() sweeping every registered lane, fidelityFor() deriving usage trust from a capability, and a second real adapter (OpenCode/NDJSON) already written and measured",
+   "why_keep": "The arena already exists in skeleton. The key design call — refuse to normalise to a lowest common denominator, because this engine's entire win lives in --session-id / --resume --fork-session — is the right one and is argued in-file with measured numbers (9.5M → 20.5M tokens per merged PR when sessions split).",
+   "coupling": "HarnessRunOptions is aliased to RunCliTaskOptions from cliStudent.ts, and the options object still names `claudeBin` — a known wart called out at harness.ts:70-75. Generalising that binary field is the main lift before a third lane."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\usageStore.ts (whole file)",
+   "what": "Append-only JSONL run history at ~/.claude-study-room/usage.jsonl with per-row harness id and a three-valued `fidelity` (exact/partial/missing), engine-wide rather than per-repo, plus a pure toUsageRecord() and a never-throws appendUsage()",
+   "why_keep": "This is the arena's scoring substrate and it already segregates rather than pools incomparable numbers — the one thing that stops a harness comparison producing a confident wrong answer. 'missing' rows are kept so a task never silently vanishes from the denominator.",
+   "coupling": "Imports Role from taskmap.ts, Tier from pricing.ts, CliUsage from cliStudent.ts — three type-only imports. Path is overridable for tests. No reader/aggregator exists yet (see pain points)."
+  }
+ ],
+ "pain_points": [
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:284-294 and 378-387",
+   "issue": "The verdict channel is a regex over ALL free-text PR comments with no author check, no round tag, and no requirement that the VERDICT line be literally first; 'last match wins'",
+   "evidence": "verdictComments() greps every comment for /VERDICT:\\s*(APPROVED|CHANGES_REQUESTED)/i and the loop takes verdicts[verdicts.length-1].state (prloop.js:290, 330). A stray human comment containing 'VERDICT:' is counted; an agent that writes a preamble before the line reads as 'no verdict' and silently halts the loop (STUDY_BOOK.md:1966, 1995)"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:237-344 vs 349-431",
+   "issue": "runTask and runExistingPr duplicate the verdict parser, both role prompts, the worktree lifecycle and the finally teardown almost verbatim — a protocol change must be made twice",
+   "evidence": "Two independent copies of the same /VERDICT:/ regex at lines 290 and 383, two copies of BUILDER_SYS/REVIEWER_SYS, two identical finally blocks at 334-340 and 423-429 (STUDY_BOOK.md:1969, 1979)"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:99-153",
+   "issue": "No timeout on the spawned agent — a stuck `claude` hangs the whole sequential loop indefinitely, and there is no kill-timer or heartbeat",
+   "evidence": "The Promise only settles on child 'close' or 'error'; nothing arms a timer (prloop.js:147-152). STUDY_BOOK.md:1970 names it: 'No timeout on the claude spawn — a stuck agent hangs the whole loop indefinitely.'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\pr-loop\\prloop.js:334-340, 423-429",
+   "issue": "Teardown swallows every error with bare `catch {}`, so a leaked worktree is invisible until a later run trips over it",
+   "evidence": "Three consecutive `try { ... } catch {}` per finally block; this is instance #7 of the portfolio's silent-failure habit (STUDY_BOOK.md:55, 1972)"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-chatroom\\chatroom.js:92-104",
+   "issue": "Every turn re-sends the entire transcript as a plain string with no window, no summarisation and no cache control, so cost grows quadratically with turn count",
+   "evidence": "renderTranscript() joins all messages and is interpolated into userContent on every speak() call; the only bound is max_tokens per turn (300) and the optional --turns cap"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-chatroom\\chatroom.js:35-38",
+   "issue": "Chatroom is the only sibling requiring ANTHROPIC_API_KEY — it is a metered-API tool in a portfolio whose entire cost thesis is riding the CLI subscription login",
+   "evidence": "`if (!process.env.ANTHROPIC_API_KEY) { ...exit(1) }` and `new Anthropic()` at line 65; every other tool (pr-loop, queue-runner, study-room, app-testing-agent) shells out to an already-authenticated CLI and stores no secrets (claude-queue-runner DESIGN.md:159-161)"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-chatroom\\chatroom.js:111-124",
+   "issue": "Agents have no tools, no repo access and no persistence — the room produces conversation text only, and the transcript is lost on exit",
+   "evidence": "speak() calls client.messages.stream with only {model, max_tokens, system, messages} and pushes the text into an in-memory array; nothing is written to disk except the room config saved by the wizard (setup.js:151-156)"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\dashboard.ts",
+   "issue": "1,200-line monolith serving inlined HTML/CSS/JS, with theming implemented as a runtime hex-string find/replace and config/lock-path logic duplicated from other modules",
+   "evidence": "themed() maps 20 hex colours by `out.split(g).join(b)` (dashboard.ts:22-36); statusPath() and lockPath() each re-load the config (38-49). STUDY_BOOK.md:450 calls it 'the least maintainable file'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\claude.ts:63",
+   "issue": "spawn with shell:true on every job — mitigated because the prompt goes over stdin and only static flags cross the shell, but it is a standing injection surface and it makes process trees need taskkill /T /F to reap",
+   "evidence": "`spawn(cfg.claudeBin, args, { cwd, shell: true, windowsHide: true })`; the tree-kill workaround lives in dashboard.ts:117,125. Same shape flagged in Study Room (STUDY_BOOK.md:1831, commit #67)"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner",
+   "issue": "No CI in a tool whose entire premise is gating merges on green CI; tests cover only the pure functions, and worktree.ts/dispatcher.ts/claude.ts/dashboard.ts have zero",
+   "evidence": "package.json defines `test` and `typecheck` but there is no .github/workflows directory in the repo listing; STUDY_BOOK.md:434-436 names the exact untested modules"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\README.md:149-167",
+   "issue": "The default permissionMode (acceptEdits) cannot complete a single job — the tool is only useful in its maximally-trusting mode (bypassPermissions = --dangerously-skip-permissions)",
+   "evidence": "README's own table: 'acceptEdits (default) | edit files only | can't push/PR — jobs never finish.' STUDY_BOOK.md:440 calls this out as the honest framing"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\gh.ts (per STUDY_BOOK.md:438)",
+   "issue": "The README/DESIGN sell 'run N runners' but a singleton pidfile lock refuses a second runner per repo — design aspires to N-runner safety, the implementation enforces single-runner",
+   "evidence": "DESIGN.md:36 'you can run N runners (or none)'; STUDY_BOOK.md:438 'the multi-runner story the README/DESIGN sell is contradicted by the code — the lock deliberately prevents it'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\app-testing-agent\\docs\\INTEGRATION.md:176-180",
+   "issue": "The contract explicitly does not cover artefact transport, push notification, or concurrency — screenshots/reports are absolute local paths, consumers must poll, and two simultaneous triggers both clobber the same state file",
+   "evidence": "'Screenshots and markdown reports are paths, not payloads… There is no push… No concurrency control. Two simultaneous hygiene runs will both write state/hygiene.json. Serialize triggers on your side.'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\app-testing-agent\\src\\ledger.ts (per STUDY_BOOK.md:1508-1510)",
+   "issue": "The run ledger is an unbounded append-only array rewritten whole on every record, with a lost-update race under the test-all concurrency pool and a non-atomic save whose corrupt-on-load fallback silently discards all history",
+   "evidence": "STUDY_BOOK.md:1508: 'recordRun loads the whole file, pushes, and rewrites it… multiple runTests calls recordRun concurrently with a read-modify-write on the same file — a classic lost-update race. saveLedger isn't atomic'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\app-testing-agent\\checks\\index.ts (per STUDY_BOOK.md:1502-1504)",
+   "issue": "The default check set is a stub (`defaultChecks = [dummyCheck]`) and the whole app-resolution pipeline (detect.ts, schema/) is orphaned — built, exported and unit-tested but never called by runTests/cli/testAll",
+   "evidence": "STUDY_BOOK.md:1502-1504: 'There is no code path where a PR run automatically selects the right checks for an app'; 'grep confirms they are never called by runTests, cli.ts, or testAll.ts'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\usageStore.ts",
+   "issue": "The usage store is write-only — there is an appender and a pure record builder, but no reader, no aggregator and no $/AC query, so the arena's evidence exists on disk with nothing to weigh it",
+   "evidence": "The file exports only usageStorePath, toUsageRecord, appendUsage and recordUsageToStore (lines 103-163); the header says the store is 'a PREREQUISITE for the multi-harness series' and that '#301 has no evidence to weigh' without it (lines 20-24) — but no consumer is present in the module"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\harness.ts:70-76",
+   "issue": "HarnessRunOptions is an alias of the Claude-CLI-shaped RunCliTaskOptions and still carries a `claudeBin` field, so the 'engine-neutral' seam is still named after one engine",
+   "evidence": "In-file comment: 'Known wart for #299: claudeBin names one specific binary. Generalising it is that issue's job'"
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room (per STUDY_BOOK.md:1821-1825)",
+   "issue": "The headline over-claim: WarmCliSession implements --session-id / --resume --fork-session but nothing imports it except its own test, so the Protector's exact/rerole/spawn cache ladder optimises a cache that is not populated on the live path; and concurrency is hand-counted across six Sets/Maps",
+   "evidence": "STUDY_BOOK.md:1821 'grep confirms nothing imports it except its own test… every task is a cold claude -p spawn that re-reads the spec'; 1825 'commit #72 exists precisely because reviews were not counted and the engine over-dispatched past the cap'"
+  }
+ ],
+ "v2_implications": [
+  "KEEP the CLI-login auth model everywhere and treat claude-chatroom as the odd one out. pr-loop, claude-queue-runner, app-testing-agent and claude-study-room all shell out to already-authenticated `claude` and `gh` and store zero secrets (claude-queue-runner DESIGN.md:159-161); chatroom is the only ANTHROPIC_API_KEY tool (chatroom.js:35-38). If v2 lifts chatroom's wizard and scheduler, lift them WITHOUT the SDK — setup.js has no Anthropic import at all, so the wizard ports cleanly and only the speak() call needs replacing with a harness run.",
+  "ADOPT stream-json, not json, as the v2 execution default. pr-loop's claude() (prloop.js:98-154) proves a live per-turn feed costs ~55 dependency-free lines; queue-runner and Study Room both use --output-format json and therefore can only show a spinner until a job ends. An arena that runs the same task on N harnesses is unwatchable without per-turn events, and a planning terminal is unusable without them.",
+  "DROP free-text sentinel protocols (`VERDICT: APPROVED`, `NEXT: <name>`, `VERDICT: APPROVE`) as the machine-readable channel. Three separate tools independently invented a regex-over-prose convention and all three are spoofable and silently fail on a preamble (prloop.js:290; chatroom.js:142-149; STUDY_BOOK.md:442, 1966). v2 should carry structured results out of band — a fenced JSON block with an idempotency key, the pattern Study Room's Editor already uses for `editor-proposals` — and keep prose for humans only.",
+  "MODEL the v2 arena boundary on app-testing-agent's export contract, not on file-reading. The rules that earned their keep: one `SCHEMA` constant checked before anything else and named on BOTH sides in the error; a read-only side-effect-free `export` safe to poll; `--json` where stdout is payload and stderr is progress; requested-but-never-run = null, not omitted; summary computed after limit; exit codes meaning only 'did the command work'; and additive-keeps-v1 / breaking-bumps-v2 pinned by a test (src/exportState.ts:32,69-87,146-160; docs/INTEGRATION.md:63-116, 182-184). Study Room's testingAgent.ts is the consumer template to copy per sibling.",
+  "KEEP the declared-capability harness model and refuse normalisation. harness.ts:11-29 argues, with measured numbers, that a lowest-common-denominator interface would erase --session-id / --resume --fork-session and make Study Room the thing it was built to beat. An arena must therefore score lanes that are NOT feature-equivalent — which means capabilities travel with every result row and the report says 'this lane ran cold' rather than pretending parity.",
+  "KEEP usage.jsonl's fidelity discipline as the arena's scoring rule: segregate, never pool. taskCost() prices cache reads at 0.1x and 95% of tokens across 69 real sessions were cache reads, so one flat-total harness mapped onto inputTokens is priced ~10x high — enough to reverse the verdict (usageStore.ts:33-47). BUILD the missing half: a reader/aggregator over usage.jsonl that reports exact and partial rows separately and keeps 'missing' rows in the denominator.",
+  "MAKE the unknown-id-throws rule a general arena invariant. getHarness() throws rather than falling back precisely so a config typo cannot run the control while claiming to run the experiment (harness.ts:128-144). Any v2 lane selector, model selector or scoring key needs the same fail-loud posture, because the failure it prevents is an experiment that silently compares A against A.",
+  "KEEP the plan/build separation with a human gate, and make the planning terminal produce the same artefact BUILD consumes. claude-queue-runner's PLAN mode emits only issues with '## Goal / ## Deliverables / ## Acceptance' + 'Depends on: #N', ready-vs-blocked labels, foundational issues created first (plan.ts:24-44), and the dashboard can plan from typed text by writing plan-input.md (dashboard.ts:97-110). A v2 planning terminal is that, made conversational: wizard-style turns in, a dependency-ordered plan file out, reviewable before anything spends.",
+  "KEEP dashboard-owns-the-process, drop the inlined-HTML monolith. Owning the engine as a child means running-state is never phantom, and the lockfile + process.kill(pid,0) probe catches engines started outside (dashboard.ts:44-59, 80-93). But 1,200 lines of inlined HTML with hex-string theming (dashboard.ts:22-36) is the least maintainable file in the portfolio and Study Room already copied it to 60KB — v2 should keep the /api/* surface and the child-lifecycle code and serve a real front-end.",
+  "CARRY FORWARD the two independent runaway guards. pr-loop pairs a hard --rounds cap with stale-round detection (no new verdict ⇒ stop, prloop.js:326,410); Study Room's watchdog pairs per-item quarantine with systemic kill; queue-runner pairs per-item retry caps with the usage-limit pause. An arena multiplies burn by the number of lanes, so v2 needs a per-lane budget stop AND a cross-lane systemic abort — noting that budgetStop is a declared capability that OpenCode does NOT have (openCodeHarness.ts:86-92), so unenforceable lanes must be capped externally.",
+  "ADD the timeouts that pr-loop lacks. There is no kill-timer on the spawned agent (prloop.js:147-152), which is fine for a supervised single-terminal tool and fatal for an unattended arena. app-testing-agent already publishes per-command timeout guidance (export 30s, revamp 10min, hygiene 15min, file-issues 5min — INTEGRATION.md:169-174) and testingAgent.ts encodes read-vs-trigger timeouts as separate constants; make that the v2 norm.",
+  "FIX the same-account review problem rather than re-implementing the workaround a fourth time. pr-loop posts a VERDICT comment because GitHub forbids self-approval (README.md:117-121), queue-runner invented a `reviewedOk` label (types.ts:22), Study Room downgrades an approve to a comment + label (STUDY_BOOK.md:1827). The study book lists this as recurring issue #7: 'self-review theater'. v2 needs a distinct reviewer identity (a second gh token/account) or an explicit human gate — and an arena that scores review quality is worthless without it.",
+  "BUDGET for the seven recurring habits the study book says a v2 must avoid (STUDY_BOOK.md:43-55): (1) no tests/CI on exactly the risky part — pure cores tested, side-effecting glue untested, called 'the highest-leverage change in the entire portfolio'; (2) the god file — dashboard.ts and live.ts are already 60KB and 145KB in Study Room; (3) destructive migrations (N/A here, but the file-state analogue is app-testing-agent's corrupt-ledger-becomes-empty, which silently discards all history); (4) in-memory cache behind multi-worker; (5) XSS via innerHTML with unescaped data — relevant the moment a v2 dashboard renders agent output or repo names; (6) README over-claim, the portfolio's 'most consistent honesty gap', with Study Room named as the sharpest case (a beautiful scheduler optimizing a cache that isn't wired in); (7) self-review theater plus fire-and-forget `catch {}` — pr-loop's teardown is cited by name.",
+  "TREAT app-testing-agent as a scoreable arena participant, not just a data source. It already emits per-run rows with a stable id (`repo#pr@sha`), pass/fail/weird results, per-feature statuses and batch ids (exportState.ts:40-57), and its hygiene scan grades a repo against the same seven habits the study book identifies. That makes it the natural 'did the produced code actually work' scorer for an arena — but note its default check set is a stub and its app-resolution pipeline is orphaned (STUDY_BOOK.md:1502-1504), so the wiring must be finished before its verdicts mean anything."
+ ],
+ "open_questions": [
+  "Does an arena score a harness on OUTCOME (PR merged, tests green, app-testing-agent verdict) or on COST ($/acceptance-criterion from usage.jsonl), or both — and how are they combined when a cheap lane produces a rejected PR? usageStore.ts names '$/AC' as the target metric but no aggregator exists to compute it.",
+  "Is the arena's unit of work one GitHub issue (Study Room / queue-runner model), one task string (pr-loop's --task), or a frozen fixture repo? Running the same task across harnesses requires a deterministic starting state; both pr-loop and queue-runner cut worktrees off a moving base branch, so two lanes starting minutes apart may not face the same repo.",
+  "How do lanes with unequal capabilities get a fair score? OpenCode declares budgetStop:false and toolAllowlist:false (openCodeHarness.ts:86-92) and cannot ride the Pro/Max subscription at all, so a head-to-head against claude-code compares different auth models, different hardware paths and different enforceable caps simultaneously.",
+  "Where does arena run history live — extend ~/.claude-study-room/usage.jsonl (engine-wide, already harness-tagged) or a new per-arena-run store? The existing store has one row per completed task with no notion of 'run N of experiment X', so a grouping key (batchId, like app-testing-agent's) may need adding.",
+  "Should the interactive planning terminal be a new surface or the existing dashboard's plan-text box (dashboard.ts:97-110) made conversational? The chatroom wizard is a blocking readline flow and the dashboard is an HTTP server — reconciling those is a real design choice, not a port.",
+  "Does v2 keep GitHub as the queue at all, or does the arena need a local plan store? Every sibling except chatroom assumes a GitHub repo with issues/PRs; an arena comparing harnesses on a scratch task may not want to open real PRs, but pr-loop's and queue-runner's entire message bus IS the PR.",
+  "Is pr-loop worth porting or is it already subsumed? Its round loop is queue-runner's REVIEW/FIX cycle at single-task granularity; the unique assets are the stream-json runner, the --log tee, and the slash-command launcher. Confirm whether v2 wants pr-loop as a component or only as a source of three idioms.",
+  "Which repo owns the v2 contract constant? app-testing-agent's model puts the schema in the PRODUCER and makes consumers check it. If a v2 arena both produces results and consumes sibling exports, it needs its own producer-side schema id plus a consumer-side check per sibling — and a rule for what happens when two siblings disagree on version.",
+  "No verification was done that these siblings still run today: node_modules exist for chatroom/queue-runner/app-testing-agent but nothing was executed (read-only session), and pr-loop has no package.json or git history at all, so there is no version to pin.",
+  "claude-chatroom's last commit-era files are dated 2026-06-07 and app-testing-agent 2026-08-06, while claude-study-room src is 2026-09-11 — confirm whether the older siblings are still maintained or are frozen references before planning to depend on their CLIs."
+ ]
+}

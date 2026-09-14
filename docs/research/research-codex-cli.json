@@ -1,0 +1,371 @@
+{
+ "key": "codex-cli",
+ "summary": "OpenAI Codex CLI as of 2026-09-13: latest stable is **0.154.0** (GitHub tag `rust-v0.154.0`, published 2026-09-09; npm `@openai/codex@0.154.0`; alpha channel `0.155.0-alpha.3.10`). NOTE: the docs moved — `developers.openai.com/codex/*` now 308-redirects to `learn.chatgpt.com/docs/*`, and every doc page has a raw-markdown twin by appending `.md` (index at `learn.chatgpt.com/llms.txt`). The GitHub `docs/*.md` files are now one-line stubs pointing at those URLs.\n\nFor a headless orchestrator on Windows 11 the shape is: (1) `codex exec --json` emits a JSONL stream on stdout with `thread.started` / `turn.started` / `item.started|updated|completed` / `turn.completed` / `turn.failed` / `error`; the final assistant text is an `item.completed` with `item.type == \"agent_message\"` (`item.text`), and token usage is only on `turn.completed.usage` as `{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}`. Exit code is 0 on success, 1 if any fatal server error / failed / interrupted turn was seen (clap arg errors → 2). `-o/--output-last-message <FILE>` writes the final message to a file (works alongside `--json`). `--output-schema <FILE>` forces structured JSON as the final message.\n(2) Resume: `codex exec resume <SESSION_ID|thread-name>` / `codex exec resume --last [--all]`, plus `codex exec fork <SESSION_ID> [PROMPT]`. **The caller cannot choose a session id up front** — thread IDs are Codex-generated UUIDv7; you must read `thread.started.thread_id` from the first JSONL line. Sessions live at `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl` (`CODEX_HOME` defaults to `~/.codex`, i.e. `C:\\Users\\<you>\\.codex` on Windows).\n(3) Auth: `codex login` (browser), `codex login --device-auth` (headless, beta), `printenv OPENAI_API_KEY | codex login --with-api-key`, `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`. Credentials cache at `$CODEX_HOME/auth.json` (or OS keyring via `cli_auth_credentials_store`). OpenAI's own docs say **API keys are the recommended default for automation**; ChatGPT-account auth in CI is documented but explicitly labelled \"advanced\", \"trusted private infrastructure only\", \"do not use for public/OSS repos\".\n(4) Rate limits are NOT in the `codex exec --json` stream. Programmatic reads: `codex app-server` JSON-RPC `account/rateLimits/read` (and `account/usage/read`, `account/rateLimitResetCredit/consume`), or the underlying HTTP `GET https://chatgpt.com/backend-api/wham/usage`. Windows: primary window ≈ 5h, secondary ≈ weekly (labels derived from `windowDurationMins` ≈ 300 / ≈ 10080).\n(5) Unattended: `--sandbox workspace-write` (exec defaults to `read-only`), `--dangerously-bypass-approvals-and-sandbox` (alias `--yolo`); `codex exec` already forces `approval_policy = never` internally. Windows now has a **native sandbox** (`[windows] sandbox = \"elevated\" | \"unelevated\"`), no WSL required.\n(6) `-m/--model`, `-c key=value`, `--cd/-C`, `-p/--profile`, `--add-dir`, `--skip-git-repo-check`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`. Models: `gpt-6-astra`, `gpt-5.6-sol|terra|luna`, `gpt-5.3-codex-spark`. **`gpt-5-codex`/`gpt-5.3-codex`/`gpt-5.2` are deprecated for ChatGPT sign-in.**\n(7) MCP is fully supported with per-server `enabled_tools` / `disabled_tools` allow/deny lists and per-tool `approval_mode`.\n\nNothing is installed on this machine: no `C:\\Users\\pegan\\.codex`, no `codex` on PATH, no `%LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin`, no `%APPDATA%\\npm\\codex.cmd`.",
+ "findings": [
+  {
+   "claim": "Latest stable Codex CLI release is 0.154.0 (git tag rust-v0.154.0), published 2026-09-09T22:35:38Z. npm dist-tags: latest=0.154.0, alpha=0.155.0-alpha.3.10 (2026-09-11). npm package bin is {\"codex\":\"bin/codex.js\"}, engines node>=16, platform binaries shipped as optionalDependencies (@openai/codex-win32-x64 -> npm:@openai/codex@0.154.0-win32-x64).",
+   "source_url": "https://api.github.com/repos/openai/codex/releases/latest",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Official Codex docs relocated: https://developers.openai.com/codex/<page> returns HTTP 308 to https://learn.chatgpt.com/docs/<page>. Raw markdown is available for any page by appending .md (e.g. https://learn.chatgpt.com/docs/non-interactive-mode.md). Full doc index at https://learn.chatgpt.com/llms.txt. The repo's docs/exec.md, docs/authentication.md, docs/sandbox.md, docs/agents_md.md are now single-line stubs pointing there.",
+   "source_url": "https://learn.chatgpt.com/llms.txt",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "codex exec JSONL top-level event types are exactly: thread.started, turn.started, turn.completed, turn.failed, item.started, item.updated, item.completed, error (serde tag=\"type\"). thread.started carries {thread_id}. turn.completed carries {usage}. turn.failed carries {error:{message}}. error carries {message}.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/exec_events.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Item types (ThreadItemDetails, snake_case tag on item.type) are: agent_message{text}, reasoning{text}, command_execution{command,aggregated_output,exit_code,status}, file_change{changes[{path,kind}],status}, mcp_tool_call{server,tool,arguments,result,error,status}, collab_tool_call{...}, web_search{id,query,action}, todo_list{items[{text,completed}]}, error{message}. Every item is wrapped as {id, ...details} inside item.started/item.updated/item.completed.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/exec_events.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Token usage appears ONLY on turn.completed as Usage{input_tokens:i64, cached_input_tokens:i64, cache_write_input_tokens:i64 (serde default), output_tokens:i64, reasoning_output_tokens:i64}. Documented sample line: {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":24763,\"cached_input_tokens\":24448,\"output_tokens\":122,\"reasoning_output_tokens\":0}}. There is NO rate_limit field anywhere in the exec JSONL schema.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/exec_events.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "The final assistant message in --json mode is the item.completed event whose item.type == \"agent_message\" (field item.text). Without --json, stderr gets progress and stdout gets only the final agent message. -o/--output-last-message writes the final message to the given file AND still prints it to stdout.",
+   "source_url": "https://learn.chatgpt.com/docs/non-interactive-mode.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "codex exec exit codes: the run loop tracks error_seen (set on a non-retrying ServerNotification::Error for the active turn, or a turn/completed with TurnStatus::Failed or Interrupted) and calls std::process::exit(1) after printing final output; otherwise returns Ok (exit 0). There is no richer exit-code taxonomy. clap argument errors exit 2 (clap default).",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/lib.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "codex exec flags (clap, v0.154.0): --json (alias --experimental-json), -o/--output-last-message <FILE>, --output-schema <FILE>, --color always|never|auto, --skip-git-repo-check, --ephemeral, --ignore-user-config, --ignore-rules, --strict-config, --thread-source <SOURCE>. Inherited shared options: -i/--image, -m/--model, --oss, --local-provider, -p/--profile, -s/--sandbox read-only|workspace-write|danger-full-access, --approve-for-me (alias --not-so-yolo), --dangerously-bypass-approvals-and-sandbox (alias --yolo), --dangerously-bypass-hook-trust, -C/--cd <DIR>, --worktree, --add-dir <DIR>. Plus -c/--config key=value from CliConfigOverrides. Subcommands: resume, fork, review.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/cli.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "-a/--ask-for-approval (values: on-request | never) is defined on the INTERACTIVE TUI Cli struct, not on the exec Cli/SharedCliOptions in v0.154.0. It is unnecessary for exec because codex exec hard-sets ConfigOverrides{approval_policy: Some(AskForApproval::Never)} with the comment \"Default to never ask for approvals in headless mode\". The retired value \"untrusted\" is no longer supported and can prevent the client from starting.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/lib.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "--full-auto is documented as a deprecated compatibility flag on codex exec (\"Prefer --sandbox workspace-write; Codex prints a warning when this flag is used\"), but it is NOT present in the v0.154.0 clap structs I inspected (exec/src/cli.rs, utils/cli/src/shared_options.rs, cli/src/main.rs). Treat it as unreliable; use --sandbox workspace-write.",
+   "source_url": "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "codex exec defaults to a read-only sandbox. Docs: \"By default, codex exec runs in a read-only sandbox.\" To let it edit: codex exec --sandbox workspace-write. To allow everything: --sandbox danger-full-access or --dangerously-bypass-approvals-and-sandbox.",
+   "source_url": "https://learn.chatgpt.com/docs/non-interactive-mode.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "codex exec requires a Git repository by default; override with --skip-git-repo-check. Also: if an enabled MCP server has required = true and fails to initialize, codex exec exits with an error instead of continuing without it.",
+   "source_url": "https://learn.chatgpt.com/docs/non-interactive-mode.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Resume semantics: ResumeArgs = {session_id: Option<String> (\"Conversation/session id (UUID) or thread name. UUIDs take precedence if it parses\"), --last, --all (\"Show all sessions (disables cwd filtering)\"), -i/--image, prompt}. When --last is used without an explicit prompt, the positional arg is reinterpreted as the prompt. Fork: ForkArgs = {SESSION_ID (uuid or thread name), -i/--image, optional PROMPT}.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/cli.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "A caller CANNOT name a session/thread id up front. Thread ids are Codex-generated UUIDv7 (Thread.id doc comment: \"Codex-generated thread IDs are UUIDv7\"), and ThreadStartParams has no id field (only model, modelProvider, serviceTier, cwd, approvalPolicy, approvalsReviewer, sandbox, config, serviceName, baseInstructions, developerInstructions, personality, ephemeral, sessionStartSource, threadSource). The only caller-controlled handle is a human-readable thread NAME, set via the TUI /rename or app-server thread/name/set, which codex exec resume <name> also accepts.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/schema/typescript/v2/Thread.ts",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Sessions (rollouts) are persisted at $CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<YYYY-MM-DD>T<HH-MM-SS>-<thread_id>.jsonl. Archived sessions go under $CODEX_HOME/archived_sessions. Reverted threads append an underscore and a distinct rollout id: rollout-<ts>-<thread_id>_<rollout_id>.jsonl. Constants: SESSIONS_SUBDIR=\"sessions\", ARCHIVED_SESSIONS_SUBDIR=\"archived_sessions\".",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/rollout/src/rollout_file_name.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "CODEX_HOME defaults to ~/.codex (on Windows: C:\\Users\\<user>\\.codex) and is the root for config, auth, logs, sessions, skills and standalone package metadata. \"If you set it, the directory must already exist.\" CODEX_SQLITE_HOME defaults to CODEX_HOME. Per-invocation isolation works: CODEX_HOME=$(pwd)/.codex codex exec \"...\".",
+   "source_url": "https://learn.chatgpt.com/docs/config-file/environment-variables.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Auth file: $CODEX_HOME/auth.json, struct AuthDotJson { auth_mode, \"OPENAI_API_KEY\", tokens: Option<TokenData>, last_refresh: DateTime<Utc>, agent_identity, personal_access_token, bedrock_api_key, bedrock_access_keys }. Storage backend is selected by config key cli_auth_credentials_store = file | keyring | auto | ephemeral. Docs: \"Treat ~/.codex/auth.json like a password: it contains access tokens.\"",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/login/src/auth/storage.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Headless login options, in OpenAI's stated preference order: (1) device code auth, beta — `codex login --device-auth` (must first be enabled in ChatGPT security settings / workspace permissions); (2) fallback — run codex login on a browser machine and copy ~/.codex/auth.json to the headless machine; (3) fallback — SSH port-forward the OAuth callback: `ssh -L 1455:localhost:1455 user@remote` then `codex login`. `codex login status` prints the active auth mode and exits 0 when credentials are present.",
+   "source_url": "https://learn.chatgpt.com/docs/auth.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "ChatGPT sign-in is supported on Plus, Pro, Business, Edu and Enterprise. Codex is also bundled into the Free tier. With ChatGPT sign-in, usage follows ChatGPT workspace permissions/RBAC/retention. With an API key, usage is billed to the OpenAI Platform account at standard API rates and \"some features that rely on ChatGPT workspace access or cloud services are limited or unavailable\".",
+   "source_url": "https://learn.chatgpt.com/docs/auth.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenAI's own guidance for automation: \"Use API key authentication for programmatic Codex CLI workflows, such as CI/CD jobs. Don't expose Codex execution in untrusted or public environments.\" and \"API keys are the right default for automation because they are simpler to provision and rotate. Use this path [ChatGPT-managed auth] only if you specifically need to run as your Codex account.\"",
+   "source_url": "https://learn.chatgpt.com/docs/auth.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenAI publishes an explicit, supported (if hedged) recipe for riding a ChatGPT account in CI: seed auth.json once via codex login on a trusted machine, copy it to the runner, run Codex normally, and persist the refreshed auth.json. Codex refreshes the token bundle when last_refresh is older than ~8 days and has a refresh-and-retry path on HTTP 401. Constraints stated: \"Do not use this workflow for public or open-source repositories\"; \"Use one auth.json per runner or per serialized workflow stream\"; \"Do not share the same file across concurrent jobs or multiple machines.\"",
+   "source_url": "https://learn.chatgpt.com/docs/auth/ci-cd-auth.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Enterprise-only alternative to riding a personal ChatGPT login: Codex access tokens. \"In ChatGPT Enterprise workspaces, admins can grant the access token permission... Access tokens are intended for trusted scripts, schedulers, and private CI runners.\" Consumed via `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token` or the CODEX_ACCESS_TOKEN env var. Also workload identity federation (OPENAI_FEDERATION_RULE_ID, OPENAI_IDENTITY_TOKEN_FILE).",
+   "source_url": "https://learn.chatgpt.com/docs/auth.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Rate limits are readable programmatically over the app-server JSON-RPC: `account/rateLimits/read` returns GetAccountRateLimitsResponse{ordinaryUsageAllowed: bool|null, rateLimits: RateLimitSnapshot, rateLimitsByLimitId: {[limitId]: RateLimitSnapshot}|null, rateLimitResetCredits, accountId, rateLimitUpsell}. RateLimitSnapshot = {limitId, limitName, normalModelSlug, primary: RateLimitWindow|null, secondary: RateLimitWindow|null, credits, individualLimit, spendControlReached, planType, rateLimitReachedType}. RateLimitWindow = {usedPercent: number, windowDurationMins: number|null, resetsAt: number|null (unix seconds)}. A push notification `account/rateLimits/updated` carries sparse rolling updates.",
+   "source_url": "https://learn.chatgpt.com/docs/app-server.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The 5-hour vs weekly mapping: the TUI derives window labels from windowDurationMins with a ±5% tolerance — 300 min => \"5h\", 1440 => \"daily\", 10080 => \"weekly\", 43200 => \"monthly\", 525600 => \"annual\". So `primary` is normally the 5-hour window and `secondary` the weekly window, but you must read windowDurationMins rather than assume.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/tui/src/chatwidget/rate_limits.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "The underlying HTTP call the CLI makes for rate limits is GET {base}/wham/usage for ChatGPT path style (base is normalized to include /backend-api, i.e. https://chatgpt.com/backend-api/wham/usage) or GET {base}/api/codex/usage for Codex-API path style. Headers sent: Authorization: Bearer <access_token>, ChatGPT-Account-Id: <account_id>, User-Agent: codex-cli, optional X-OpenAI-Fedramp, and optional x-openai-codex-luna-reserve: 1. Related: GET .../wham/rate-limit-reset-credits, POST .../wham/rate-limit-reset-credits/consume, GET .../wham/accounts/check, GET .../wham/profiles/me.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/backend-client/src/client/rate_limit_resets.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Raw HTTP usage payload shape (RateLimitStatusPayload): {plan_type, rate_limit: {allowed: bool, limit_reached: bool, primary_window: RateLimitWindowSnapshot, secondary_window: RateLimitWindowSnapshot}, credits, spend_control, additional_rate_limits[], rate_limit_reached_type}. RateLimitWindowSnapshot = {used_percent: i32, limit_window_seconds: i32, reset_after_seconds: i32, reset_at: i32}. Integration test also confirms header requirements ('authorization: Bearer ...', 'chatgpt-account-id: ...') and shows a reset-credit titled \"Full reset (Weekly + 5 hr)\".",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-backend-openapi-models/src/models/rate_limit_status_payload.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Rate-limit info is ALSO carried in-band on model HTTP responses as headers, parsed by codex-api: x-codex-primary-used-percent, x-codex-primary-window-minutes, x-codex-primary-reset-at, x-codex-secondary-used-percent, x-codex-secondary-window-minutes, x-codex-secondary-reset-at. Other metered buckets use x-<limit-id>-* with underscores replaced by hyphens (e.g. x-codex-other-primary-used-percent).",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-api/src/rate_limits.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "account/usage/read returns {summary:{lifetimeTokens, peakDailyTokens, longestRunningTurnSec, currentStreakDays, longestStreakDays}, dailyUsageBuckets:[{startDate,tokens}], threadUsage?}. \"The endpoint requires authentication backed by Codex services. ChatGPT, external ChatGPT tokens, agent identity, and personal access token auth work; API-key-only and Bedrock auth don't.\"",
+   "source_url": "https://learn.chatgpt.com/docs/app-server.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "In the TUI, `/status` shows active model, approval policy, writable roots and current token usage; `/usage`, `/usage daily`, `/usage weekly`, `/usage cumulative` show account token activity and let you redeem an earned rate-limit reset. The web usage dashboard is https://chatgpt.com/codex/settings/usage. There is no `codex usage` top-level CLI subcommand — use app-server or the HTTP endpoint for headless reads.",
+   "source_url": "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "app-server protocol: JSON-RPC 2.0 with the \"jsonrpc\":\"2.0\" header omitted on the wire. Transports: --listen stdio:// (default, JSONL), ws://IP:PORT (experimental), unix:// or unix://PATH, off. Clients MUST send `initialize` then the `initialized` notification before any other method. Experimental methods/fields require capabilities.experimentalApi=true. WebSocket ingress backpressure returns JSON-RPC error -32001 \"Server overloaded; retry later.\" Schemas can be generated per-version with `codex app-server generate-ts --out ./schemas` / `generate-json-schema --out ./schemas`.",
+   "source_url": "https://learn.chatgpt.com/docs/app-server.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The old `codex mcp-server` command and standalone `codex-mcp-server` binary have been REMOVED. Use `codex app-server` for embedding integrations. There are also first-party SDKs: TypeScript `npm install @openai/codex-sdk` (Node >=18; Codex/startThread/resumeThread/run, result.finalResponse) and Python `pip install openai-codex` (Python >=3.10; drives the local app-server over JSON-RPC; Codex/AsyncCodex, thread_start(model=..., sandbox=Sandbox.workspace_write), result.final_response).",
+   "source_url": "https://learn.chatgpt.com/docs/codex-sdk.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Windows now has a native sandbox (no WSL required): config `[windows] sandbox = \"elevated\"` (preferred; dedicated lower-privilege sandbox users, filesystem ACL boundaries, firewall rules, local policy changes) or `\"unelevated\"` (fallback; restricted token derived from your user, ACL-based boundaries, environment-level offline controls). `windows.sandbox_private_desktop` defaults to true. Windows 11 is \"Recommended\". winget should be available. Sandbox log at CODEX_HOME/.sandbox/sandbox.log. Windows error 1385 = logon-right policy blocking the sandbox users. WSL2 uses the Linux bwrap+seccomp sandbox; WSL1 unsupported since 0.115.",
+   "source_url": "https://learn.chatgpt.com/docs/windows/windows-sandbox.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "In workspace-write, writable roots still protect <writable_root>/.git, <writable_root>/.agents and <writable_root>/.codex as read-only (recursively). The workspace includes the cwd plus temp dirs. Network is OFF by default in workspace-write; enable with [sandbox_workspace_write] network_access = true, and optionally constrain it with [features.network_proxy] enabled=true + domains allowlist.",
+   "source_url": "https://learn.chatgpt.com/docs/agent-approvals-security.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Documented sandbox/approval presets: Auto = --sandbox workspace-write --ask-for-approval on-request; Read-only non-interactive (CI) = --sandbox read-only --ask-for-approval never; Dangerous full access = --dangerously-bypass-approvals-and-sandbox (alias --yolo). \"For non-interactive runs, use codex exec --sandbox workspace-write; Codex keeps older codex exec --full-auto invocations as a deprecated compatibility path and prints a warning.\" Note: under --yolo/full-access, web_search defaults to LIVE results instead of the cached index.",
+   "source_url": "https://learn.chatgpt.com/docs/agent-approvals-security.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Current models (Sept 2026): gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna (all Codex-CLI-capable), gpt-5.3-codex-spark (Pro-only research preview, separate usage limit). DEPRECATED for ChatGPT sign-in: gpt-5.2 and gpt-5.3-codex are already deprecated; gpt-5.4 and gpt-5.4-mini retire 2026-08-31 (replace with gpt-5.6-terra / gpt-5.6-luna). Docs explicitly say to update `codex exec --model` commands referencing those. Select with `-m`/`--model` or config `model = \"gpt-5.6\"`.",
+   "source_url": "https://learn.chatgpt.com/docs/models.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Plan usage estimates are stated as local messages per FIVE-HOUR period and note \"Weekly limits may also apply\": GPT-6 Astra Plus 5-45 / Pro5x 25-225 / Pro20x 100-900; GPT-5.6 Sol 10-100 / 50-500 / 200-2,000; GPT-5.6 Terra 25-200 / 125-1,000 / 500-4,000; GPT-5.6 Luna 250-2,000 / 1,250-10,000 / 5,000-40,000. Business ($100) uses Pro 5x estimates; Standard Business matches Plus. These are estimates, not fixed message limits.",
+   "source_url": "https://learn.chatgpt.com/docs/pricing.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "MCP tool restriction is first-class per server in config.toml: enabled_tools (allow list), disabled_tools (deny list, applied AFTER enabled_tools), default_tools_approval_mode (auto|prompt|writes|approve), tools.<tool>.approval_mode, tools.<tool>.output_token_limit, enabled, required, startup_timeout_sec (default 10), tool_timeout_sec (default 60). Same keys exist under plugins.<plugin>.mcp_servers.<server>.*. Global mcp_optional_startup_grace_ms defaults to 1000.",
+   "source_url": "https://learn.chatgpt.com/docs/extend/mcp.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Built-in tools can also be gated by config: tools.web_search, tools.view_image, features.shell_tool (\"Enable the default shell tool for running commands (stable; on by default)\"), tool_suggest.disabled_tools, top-level web_search = \"cached\" (default) | \"live\" | \"disabled\" | \"indexed\", allow_login_shell, experimental_use_unified_exec_tool. Beta \"permission profiles\" (permissions.<name>.*) give named filesystem/network scopes selectable with --permission-profile/-P.",
+   "source_url": "https://learn.chatgpt.com/docs/config-file/config-reference.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "AGENTS.md discovery: global $CODEX_HOME/AGENTS.override.md else $CODEX_HOME/AGENTS.md (first non-empty only), then walk from project root down to cwd checking AGENTS.override.md, then AGENTS.md, then project_doc_fallback_filenames — at most one file per directory. Files are concatenated root-first so nearer files win. Cap is project_doc_max_bytes, default 32 KiB. Rebuilt on every run; no cache.",
+   "source_url": "https://learn.chatgpt.com/docs/agent-configuration/agents-md.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Config precedence and layering: CLI -c key=value overrides win for that invocation; -p/--profile layers $CODEX_HOME/<name>.config.toml on top of the base user config; project-scoped .codex/config.toml files are loaded from project root down to cwd (closest wins) but ONLY for trusted projects. --ignore-user-config skips $CODEX_HOME/config.toml entirely (auth still uses CODEX_HOME). --strict-config errors on unknown config keys.",
+   "source_url": "https://learn.chatgpt.com/docs/config-file/config-advanced.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenAI Terms of Use \"What you cannot do\" (verbatim, relevant items): \"Modify, copy, lease, sell or distribute any of our Services.\"; \"Automatically or programmatically extract data or Output (defined below).\"; \"Interfere with or disrupt our Services, including circumvent any rate limits or restrictions or bypass any protective measures or safety mitigations we put on our Services.\"",
+   "source_url": "https://openai.com/policies/row-terms-of-use/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "On the openai/codex repo, OpenAI staff (@etraut-openai, 2025-12-19) responded to a direct ToS question about forking Codex CLI while using Sign-in-with-ChatGPT: \"The codex CLI sources are licensed under a permissive Apache license, and you're welcome to fork the repo and make modifications to suit your own needs\", and pointed at the Terms of Use. On 2026-02-09 they added \"our terms of use and code license are quite permissive\" and recommended consulting legal counsel for commercial use. Direct questions about reselling an app that rides a user's ChatGPT OAuth (2026-02-07, 2026-05-05) remain UNANSWERED.",
+   "source_url": "https://github.com/openai/codex/discussions/8338",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-02-09"
+  },
+  {
+   "claim": "Installer paths: standalone installer default CODEX_INSTALL_DIR is %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin on Windows (~/.local/bin on macOS/Linux); the standalone package cache lives under CODEX_HOME/packages/standalone. CODEX_NON_INTERACTIVE=1 makes the installer skip prompts. Windows install one-liner: powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\". npm alternative: npm install -g @openai/codex (would land at %APPDATA%\\npm\\codex.cmd on this machine, npm prefix = C:\\Users\\pegan\\AppData\\Roaming\\npm).",
+   "source_url": "https://learn.chatgpt.com/docs/config-file/environment-variables.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Codex is NOT currently installed on this machine: C:\\Users\\pegan\\.codex does not exist, `codex` is not on PATH, C:\\Users\\pegan\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin does not exist, C:\\Users\\pegan\\AppData\\Roaming\\npm\\codex.cmd does not exist. Node is at C:\\Program Files\\nodejs\\node.exe and npm prefix is C:\\Users\\pegan\\AppData\\Roaming\\npm.",
+   "source_url": "local filesystem probe (PowerShell Test-Path / Get-Command)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "RUST_LOG controls CLI/app-server log verbosity; \"codex exec defaults to error output unless you set a more verbose value\". In non-interactive mode codex exec prints messages inline rather than writing a separate TUI log file. Plaintext TUI log is opt-in via -c log_dir=./.codex-log.",
+   "source_url": "https://learn.chatgpt.com/docs/config-file/environment-variables.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Stdin behavior: if stdin is piped AND a prompt argument is given, the prompt is the instruction and the piped content is appended as a <stdin> block of context. If the prompt argument is omitted (or is `-`), the whole prompt is read from stdin. `codex exec -` forces stdin-as-prompt. Flags can follow the sentinel: `generate_prompt.sh | codex exec - --json > result.jsonl`.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/exec/src/cli.rs",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "PlanType enum values reported by the backend/app-server: free, go, plus, pro, prolite, team, self_serve_business_prolite, self_serve_business_usage_based, business, ent26, enterprise_cbp_automation, enterprise_cbp_usage_based, enterprise, edu, edu_plus, edu_pro, unknown. RateLimitReachedType: rate_limit_reached, workspace_owner_credits_depleted, workspace_member_credits_depleted, workspace_owner_usage_limit_reached, workspace_member_usage_limit_reached.",
+   "source_url": "https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-09"
+  },
+  {
+   "claim": "Enterprise admins can hard-block the orchestrator's preferred setup via requirements.toml: forced_login_method (\"chatgpt\"|\"api\"), forced_chatgpt_workspace_id, allowed_login_methods, allowed_approval_policies, allowed_approvals_reviewers, allowed_sandbox_modes, allowed_permission_profiles, allowed_web_search_modes, windows.allowed_sandbox_implementations, cli_auth_credentials_store, chatgpt_base_url. \"If the active credentials don't match the configured restrictions, Codex logs the user out and exits.\" Users cannot override managed requirements via config.toml or -c.",
+   "source_url": "https://learn.chatgpt.com/docs/auth.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  }
+ ],
+ "exact_commands_or_apis": [
+  "# Install (Windows, official standalone installer)\npowershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
+  "# Unattended install (skip prompts)\n$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex",
+  "# npm install (alternative)\nnpm install -g @openai/codex",
+  "# Installed-version check\ncodex --version        # also: codex -V ; codex exec --version",
+  "# Deeper local diagnostic (install/config/auth/runtime/git/terminal/app-server/threads)\ncodex doctor --summary [--all] [--no-color] [--ascii]",
+  "# Windows install paths\n%LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe        (standalone installer default, overridable with CODEX_INSTALL_DIR)\n%APPDATA%\\npm\\codex.cmd                                   (npm -g shim)\n%CODEX_HOME%\\packages\\standalone                          (standalone package cache)",
+  "# State root (Windows)\nC:\\Users\\<user>\\.codex\\config.toml\nC:\\Users\\<user>\\.codex\\auth.json\nC:\\Users\\<user>\\.codex\\history.jsonl\nC:\\Users\\<user>\\.codex\\sessions\\YYYY\\MM\\DD\\rollout-YYYY-MM-DDTHH-MM-SS-<thread_id>.jsonl\nC:\\Users\\<user>\\.codex\\archived_sessions\\...\nC:\\Users\\<user>\\.codex\\.sandbox\\sandbox.log            (Windows sandbox diagnostics)\nC:\\Users\\<user>\\.codex\\AGENTS.md  /  AGENTS.override.md",
+  "# Core headless invocation the orchestrator should use\ncodex exec --json --sandbox workspace-write --cd C:\\path\\to\\repo -m gpt-5.6-terra -o out\\last.txt \"<task>\"",
+  "# Fully unattended, externally sandboxed (dangerous)\ncodex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \"<task>\"\n# alias: --yolo",
+  "# Structured output contract\ncodex exec \"Extract project metadata\" --output-schema .\\schema.json -o .\\project-metadata.json",
+  "# Resume / fork\ncodex exec resume <SESSION_ID|thread-name> \"<follow-up>\"\ncodex exec resume --last \"<follow-up>\"\ncodex exec resume --last --all \"<follow-up>\"      # --all disables cwd filtering\ncodex exec fork <SESSION_ID> \"<prompt>\"\ncodex exec review --uncommitted | --base <BRANCH> | --commit <SHA> [--title <T>]",
+  "# All codex exec flags (v0.154.0, from clap)\n--json | --experimental-json\n-o, --output-last-message <FILE>\n--output-schema <FILE>\n--color always|never|auto            (default auto)\n--skip-git-repo-check\n--ephemeral                          (do not persist rollout files)\n--ignore-user-config                 (skip $CODEX_HOME/config.toml; auth still uses CODEX_HOME)\n--ignore-rules                       (skip user+project execpolicy .rules)\n--strict-config\n--thread-source <SOURCE>\n-i, --image <FILE[,FILE...]>\n-m, --model <MODEL>\n--oss  /  --local-provider <lmstudio|ollama>\n-p, --profile <NAME>\n-s, --sandbox <read-only|workspace-write|danger-full-access>\n--approve-for-me                     (alias --not-so-yolo; routes approvals to auto-review)\n--dangerously-bypass-approvals-and-sandbox   (alias --yolo)\n--dangerously-bypass-hook-trust\n-C, --cd <DIR>\n--worktree                           (cannot combine with --ignore-user-config / --ephemeral / resume / review)\n--add-dir <DIR>                      (repeatable)\n-c, --config key=value               (repeatable, TOML-parsed)\n--full-auto                          (DOCUMENTED as deprecated; NOT found in v0.154.0 clap source — do not rely on it)",
+  "# JSONL stream, one JSON object per line on stdout\n{\"type\":\"thread.started\",\"thread_id\":\"0199a213-81c0-7800-8aa1-bbab2a035a53\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"item.started\",\"item\":{\"id\":\"item_1\",\"type\":\"command_execution\",\"command\":\"bash -lc ls\",\"status\":\"in_progress\"}}\n{\"type\":\"item.updated\",\"item\":{...}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_3\",\"type\":\"agent_message\",\"text\":\"...\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":24763,\"cached_input_tokens\":24448,\"cache_write_input_tokens\":0,\"output_tokens\":122,\"reasoning_output_tokens\":0}}\n{\"type\":\"turn.failed\",\"error\":{\"message\":\"...\"}}\n{\"type\":\"error\",\"message\":\"...\"}",
+  "# item.type values\nagent_message{text} | reasoning{text} | command_execution{command,aggregated_output,exit_code,status:in_progress|completed|failed|declined} | file_change{changes:[{path,kind:add|delete|update}],status:in_progress|completed|failed} | mcp_tool_call{server,tool,arguments,result,error,status} | collab_tool_call{tool,sender_thread_id,receiver_thread_ids,prompt,agents_states,status} | web_search{id,query,action} | todo_list{items:[{text,completed}]} | error{message}",
+  "# Exit codes\n0  = turn completed without a fatal error\n1  = fatal server error, turn status Failed or Interrupted, or a startup/validation bail (git-repo check, required MCP server failure, bad flag combo)\n2  = clap argument parsing error (clap default)",
+  "# Auth\ncodex login                                   # browser OAuth, callback on localhost:1455\ncodex login --device-auth                     # headless device-code flow (beta; must be enabled in ChatGPT security/workspace settings)\nprintenv OPENAI_API_KEY | codex login --with-api-key\nprintenv CODEX_ACCESS_TOKEN | codex login --with-access-token\ncodex login status                            # exits 0 when credentials are present\ncodex logout\nssh -L 1455:localhost:1455 user@remote        # tunnel the OAuth callback",
+  "# Per-invocation API key (does NOT touch auth.json)\nCODEX_API_KEY=<key> codex exec --json \"<task>\"\n# usable with: codex exec, codex review, the TypeScript SDK, codex exec-server --remote",
+  "# Env vars Codex reads\nCODEX_HOME                     (default ~/.codex; dir must already exist if you set it)\nCODEX_SQLITE_HOME              (default CODEX_HOME)\nCODEX_API_KEY                  (exec/review/SDK/remote exec-server)\nCODEX_ACCESS_TOKEN             (ChatGPT/Codex access token for trusted automation)\nOPENAI_API_KEY                 (piped to codex login --with-api-key)\nOPENAI_FEDERATION_RULE_ID / OPENAI_IDENTITY_TOKEN_FILE / OPENAI_WORKLOAD_IDENTITY_CONTEXT\nCODEX_CA_CERTIFICATE           (PEM bundle; falls back to SSL_CERT_FILE)\nCODEX_NON_INTERACTIVE          (installer only)\nCODEX_INSTALL_DIR              (installer only)\nRUST_LOG                       (exec defaults to 'error')",
+  "# Rate limits via app-server JSON-RPC (stdio)\ncodex app-server            # or: codex app-server --listen stdio://\n>>> {\"method\":\"initialize\",\"id\":0,\"params\":{\"clientInfo\":{\"name\":\"my_orchestrator\",\"title\":\"My Orchestrator\",\"version\":\"0.1.0\"}}}\n>>> {\"method\":\"initialized\",\"params\":{}}\n>>> {\"method\":\"account/rateLimits/read\",\"id\":6}\n<<< {\"id\":6,\"result\":{\"ordinaryUsageAllowed\":true,\"rateLimits\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":25,\"windowDurationMins\":300,\"resetsAt\":1730947200},\"secondary\":{\"usedPercent\":42,\"windowDurationMins\":10080,\"resetsAt\":1730950800},\"rateLimitReachedType\":null},\"rateLimitsByLimitId\":{...},\"rateLimitResetCredits\":{...},\"accountId\":\"...\"}}",
+  "# Other account JSON-RPC methods\naccount/read {\"refreshToken\":false}      -> {account:{type:\"chatgpt\",email,planType}|{type:\"apiKey\"}, requiresOpenaiAuth}\naccount/login/start                      -> apiKey | chatgpt | chatgptDeviceCode | chatgptAuthTokens(experimental)\naccount/login/cancel {loginId}\naccount/logout\naccount/usage/read                       -> {summary:{lifetimeTokens,peakDailyTokens,longestRunningTurnSec,currentStreakDays,longestStreakDays},dailyUsageBuckets:[{startDate,tokens}]}\naccount/rateLimitResetCredit/consume {idempotencyKey, creditId?}  -> {outcome: reset|alreadyRedeemed|nothingToReset|noCredit}\naccount/workspaceMessages/read\naccount/sendAddCreditsNudgeEmail {creditType: credits|usage_limit}\n# notifications (no id): account/updated, account/rateLimits/updated, thread/tokenUsage/updated",
+  "# Thread/turn JSON-RPC (for a persistent orchestrator instead of one process per task)\nthread/start {model,cwd,approvalPolicy,sandbox,config,serviceName,ephemeral,...}  -> {thread:{id,sessionId,...}}   # NO caller-supplied id\nthread/resume {threadId,...}\nthread/fork {threadId, lastTurnId?, ephemeral?, ...}\nthread/name/set {threadId,name}          # the ONLY caller-chosen handle; resumable by name from the CLI\nthread/list / thread/read / thread/archive / thread/delete / thread/unsubscribe\nturn/start {threadId, input:[{type:\"text\",text:\"...\"}]} / turn/steer / turn/interrupt\nmodel/list {limit,includeHidden}\ncodex app-server generate-ts --out ./schemas\ncodex app-server generate-json-schema --out ./schemas",
+  "# Raw HTTP endpoint the CLI itself calls for usage/limits\nGET https://chatgpt.com/backend-api/wham/usage\n  Authorization: Bearer <tokens.access_token from auth.json>\n  ChatGPT-Account-Id: <account id>\n  User-Agent: codex-cli\n  [x-openai-codex-luna-reserve: 1]     # only for clients that can apply Luna Reserve\nGET  https://chatgpt.com/backend-api/wham/rate-limit-reset-credits\nPOST https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume\nGET  https://chatgpt.com/backend-api/wham/accounts/check\nGET  https://chatgpt.com/backend-api/wham/profiles/me\n# Codex-API path style equivalents: {base}/api/codex/usage, /api/codex/rate-limit-reset-credits[/consume], /api/codex/accounts/check, /api/codex/profiles/me\n# Response: {plan_type, rate_limit:{allowed,limit_reached,primary_window,secondary_window}, credits, spend_control, additional_rate_limits[], rate_limit_reached_type}\n# *_window = {used_percent, limit_window_seconds, reset_after_seconds, reset_at}",
+  "# In-band rate-limit response headers on model calls\nx-codex-primary-used-percent / x-codex-primary-window-minutes / x-codex-primary-reset-at\nx-codex-secondary-used-percent / x-codex-secondary-window-minutes / x-codex-secondary-reset-at\nx-<limit-id>-primary-*   (underscores in limit_id become hyphens, e.g. x-codex-other-primary-used-percent)",
+  "# Useful -c config overrides for a headless orchestrator\ncodex exec -c approval_policy=never -c sandbox_mode=workspace-write \\\n  -c sandbox_workspace_write.network_access=true \\\n  -c model_reasoning_effort=medium \\\n  -c tools.web_search=false -c tools.view_image=false \\\n  -c web_search=disabled \\\n  -c hide_agent_reasoning=true \\\n  -c history.persistence=none \\\n  -c cli_auth_credentials_store=file \\\n  -c check_for_update_on_startup=false \\\n  -c 'projects.\"C:/path/to/repo\".trust_level=\"trusted\"' \\\n  --json \"<task>\"",
+  "# config.toml: restrict MCP tools\n[mcp_servers.chrome_devtools]\nurl = \"http://localhost:3000/mcp\"\nenabled_tools = [\"open\", \"screenshot\"]\ndisabled_tools = [\"screenshot\"]       # applied AFTER enabled_tools\ndefault_tools_approval_mode = \"prompt\"  # auto | prompt | writes | approve\nstartup_timeout_sec = 20\ntool_timeout_sec = 45\nenabled = true\nrequired = false\n[mcp_servers.chrome_devtools.tools.open]\napproval_mode = \"approve\"\noutput_token_limit = 30000",
+  "# MCP CLI\ncodex mcp add <name> --env K=V -- <stdio command...>\ncodex mcp add <name> --url https://mcp.example.com [--oauth-client-id ID] [--bearer-token-env-var VAR]\ncodex mcp list [--json]\ncodex mcp get <name> [--json]\ncodex mcp remove <name>\ncodex mcp login <name> [--scopes a,b] [--oauth-client-registration auto|cimd|dcr]\ncodex mcp logout <name>",
+  "# Windows native sandbox config\n[windows]\nsandbox = \"elevated\"   # or \"unelevated\"\nsandbox_private_desktop = true\n# test a command under the sandbox:\ncodex sandbox windows [--permissions-profile <name>] [COMMAND]...",
+  "# Doc fetch trick for future research (raw markdown of any page)\ncurl -sL https://learn.chatgpt.com/llms.txt\ncurl -sL https://learn.chatgpt.com/docs/non-interactive-mode.md\ncurl -sL \"https://learn.chatgpt.com/docs/developer-commands.md?surface=cli\"\ncurl -sL https://learn.chatgpt.com/docs/app-server.md\ncurl -sL https://learn.chatgpt.com/docs/config-file/config-reference.md"
+ ],
+ "policy_notes": [
+  "OpenAI Terms of Use, \"What you cannot do\" (verbatim): \"Automatically or programmatically extract data or Output\" and \"Interfere with or disrupt our Services, including circumvent any rate limits or restrictions or bypass any protective measures or safety mitigations we put on our Services.\" and \"Modify, copy, lease, sell or distribute any of our Services.\" Source: https://openai.com/policies/row-terms-of-use/ (fetched 2026-09-13). Note these clauses are aimed at scraping/limit-evasion; the same terms govern Codex CLI itself, which is by definition a programmatic client OpenAI ships. The sharp edges for an orchestrator are (a) circumventing rate limits and (b) reselling/redistributing the Service.",
+  "OpenAI's own Codex docs give the clearest operational rule: \"Use API key authentication for programmatic Codex CLI workflows, such as CI/CD jobs. Don't expose Codex execution in untrusted or public environments.\" (learn.chatgpt.com/docs/auth). And in the non-interactive docs: \"API keys are the right default for automation because they are simpler to provision and rotate. Use this path [ChatGPT-managed auth] only if you specifically need to run as your Codex account.\"",
+  "There is NO blanket prohibition on driving Codex CLI from an orchestrator with a ChatGPT login. OpenAI publishes a dedicated, supported guide for exactly that in CI: https://learn.chatgpt.com/docs/auth/ci-cd-auth. Its stated constraints are the policy boundary in practice: (1) \"This is an advanced workflow for enterprise and other trusted private automation.\" (2) \"Do not use this workflow for public or open-source repositories.\" (3) \"Use one auth.json per runner or per serialized workflow stream. Do not share the same file across concurrent jobs or multiple machines.\" (4) \"Treat ~/.codex/auth.json like a password.\" A single local orchestrator on one Windows box, using one account, one auth.json, serialized, for the account owner's own work, sits inside those lines.",
+  "Enterprise automation has a sanctioned credential type that is NOT a personal login: Codex access tokens. \"In ChatGPT Enterprise workspaces, admins can grant the access token permission so permitted members can create Codex access tokens for trusted, non-interactive Codex local workflows... Access tokens are intended for trusted scripts, schedulers, and private CI runners.\" Consumed via CODEX_ACCESS_TOKEN / `codex login --with-access-token`. Workload identity federation is the preferred option where the runtime already issues short-lived tokens.",
+  "Account pooling / rotating multiple ChatGPT subscriptions through a proxy to get more throughput is the thing most likely to be read as \"circumvent any rate limits or restrictions.\" Nothing in the Codex docs sanctions it; the CI guide explicitly forbids sharing one auth.json across concurrent jobs or machines. One orchestrator, one account.",
+  "On forking/embedding: OpenAI staff (@etraut-openai) on github.com/openai/codex/discussions/8338 confirmed (2025-12-19) \"The codex CLI sources are licensed under a permissive Apache license, and you're welcome to fork the repo and make modifications to suit your own needs\", and (2026-02-09) \"our terms of use and code license are quite permissive\", while deferring commercial questions to legal counsel. Direct questions about SELLING a product that authenticates with end users' ChatGPT OAuth (asked 2026-02-07 and 2026-05-05) went unanswered — that specific case is genuinely unresolved.",
+  "Enterprise/managed devices can block this setup outright. requirements.toml can pin forced_login_method, forced_chatgpt_workspace_id, allowed_login_methods, allowed_approval_policies, allowed_sandbox_modes, allowed_permission_profiles, windows.allowed_sandbox_implementations, cli_auth_credentials_store, chatgpt_base_url — and \"If the active credentials don't match the configured restrictions, Codex logs the user out and exits.\" Users cannot override managed requirements with config.toml or -c.",
+  "Telemetry/attribution: app-server `initialize.params.clientInfo.name` is used to identify your client for the OpenAI Compliance Logs Platform, and the docs ask enterprise integrations to contact OpenAI to be added to a known-clients list. `thread/start.serviceName` tags thread-level metrics. Setting an honest clientInfo.name is the cooperative move for an orchestrator.",
+  "Data handling differs by auth mode: ChatGPT sign-in means Codex usage follows ChatGPT workspace permissions/RBAC and ChatGPT Enterprise retention + residency settings; API-key sign-in follows the API organization's retention and data-sharing settings instead.",
+  "Prompt-injection surface note from OpenAI's security docs: the network proxy \"does not filter web search, apps, MCP, or other hosted tools\", and under --yolo / full-access sandbox settings web_search silently defaults to LIVE results instead of the cached index."
+ ],
+ "recommendations": [
+  "Pin the version. `npm install -g @openai/codex@0.154.0` (or the standalone installer) and record `codex --version` in your orchestrator's health check. The CLI ships multiple alpha builds per DAY (0.155.0-alpha.3.10 on 2026-09-11) and flags/protocol shapes move between them. Set `check_for_update_on_startup = false` so Codex never self-mutates under you.",
+  "Standard task invocation: `codex exec --json --sandbox workspace-write --cd <repo> -m <model> -o <run>\\last.txt \"<task>\"`. Parse stdout line-by-line as JSONL; capture stderr separately for diagnostics. Do NOT rely on `--full-auto` — it is documented as deprecated and is absent from the v0.154.0 clap source.",
+  "Capture `thread_id` from the FIRST stdout line (`{\"type\":\"thread.started\",\"thread_id\":\"...\"}`) and persist it in your own job record immediately. You cannot pre-assign an id. If you want a human-readable handle, start the thread through `codex app-server` and call `thread/name/set`, then `codex exec resume <name>` works.",
+  "Accumulate cost from `turn.completed.usage` — sum `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` across every turn in a run. A multi-turn resumed session emits one `turn.completed` per turn, so do not overwrite; accumulate.",
+  "For a machine-readable final answer, prefer `--output-schema schema.json -o result.json` over parsing prose out of the `agent_message` item. The final message then IS the JSON object, and you still get it on stdout.",
+  "Read rate limits OUT OF BAND, never from the exec stream. Run one long-lived `codex app-server` (stdio), do `initialize` + `initialized` once, then poll `account/rateLimits/read` before dispatching work. Gate on `ordinaryUsageAllowed === true`, and key your backoff on the window whose `windowDurationMins` is ~300 (5h) and ~10080 (weekly) rather than assuming primary/secondary. `resetsAt` is unix seconds.",
+  "Cheaper alternative if you do not want a second process: read `$CODEX_HOME/auth.json` -> `tokens.access_token` + account id, and `GET https://chatgpt.com/backend-api/wham/usage` with `Authorization: Bearer ...` and `ChatGPT-Account-Id: ...`. This is exactly what the CLI does. Caveat: it is an undocumented internal endpoint, so wrap it in a try/except and fall back to app-server.",
+  "Budget defense in depth: because `usedPercent` only updates after a call, also track your own token totals from `turn.completed.usage` and stop dispatching when either the local estimate or the server percentage crosses your threshold. Handle `rateLimitReachedType` values (rate_limit_reached, workspace_*_credits_depleted, workspace_*_usage_limit_reached) distinctly — only the first is a wait-and-retry.",
+  "Auth: use `codex login --device-auth` for the initial sign-in on the Windows box, then set `cli_auth_credentials_store = \"file\"` so auth.json is inspectable/backupable by your orchestrator. Codex refreshes the token in place when `last_refresh` is older than ~8 days, so just run a trivial `codex exec --json \"Reply with the single word OK.\"` on a weekly timer to keep it alive. Never run two orchestrator workers against the same auth.json concurrently.",
+  "Sandboxing on Windows 11: run `/setup-default-sandbox` once in the TUI (or let onboarding do it) to get `[windows] sandbox = \"elevated\"`, then keep `--sandbox workspace-write` for all orchestrated runs. Avoid `--dangerously-bypass-approvals-and-sandbox` on a dev machine — it also flips web_search to live, widening prompt-injection exposure. If elevated setup fails (UAC declined, enterprise policy, error 1385), fall back to `\"unelevated\"` rather than disabling the sandbox.",
+  "Isolate the orchestrator's config from the user's interactive Codex: set `CODEX_HOME=C:\\path\\to\\orchestrator\\.codex` (the dir must already exist) per invocation, or use `--ignore-user-config` plus explicit `-c` overrides. This also keeps orchestrator sessions out of the user's `codex resume` picker.",
+  "Lock the tool surface: `-c tools.web_search=false -c tools.view_image=false -c web_search=disabled`, and for MCP servers use `enabled_tools` as an allow-list (remember `disabled_tools` is applied AFTER `enabled_tools`). Set `required = true` only on servers whose absence should hard-fail the run — that turns a missing server into a non-zero exit instead of a silently degraded run.",
+  "Migrate any hardcoded model ids now. `gpt-5-codex`, `gpt-5.3-codex` and `gpt-5.2` are deprecated for ChatGPT sign-in; `gpt-5.4`/`gpt-5.4-mini` retired 2026-08-31. Use `gpt-5.6-terra` as the default workhorse, `gpt-5.6-luna` for cheap/high-volume subtasks, `gpt-5.6-sol` or `gpt-6-astra` for hard work. Discover available ids at runtime via app-server `model/list` or `codex debug models --bundled` instead of hardcoding.",
+  "If you end up wanting a long-lived, multi-thread, steerable driver rather than one process per task, skip `codex exec` and drive `codex app-server` directly (or use `pip install openai-codex` / `npm install @openai/codex-sdk`). You get `turn/steer`, `turn/interrupt`, `thread/fork`, streaming `item/agentMessage/delta`, approval callbacks and account/rate-limit reads on one connection. Note `codex mcp-server` is removed — app-server is the only embedding path.",
+  "Treat exit codes as coarse: 0 = clean, 1 = everything else, 2 = you passed a bad flag. To distinguish 'model failed' from 'sandbox refused' from 'rate limited', you must parse the `turn.failed.error.message` / `error.message` JSONL events. Build that classifier early.",
+  "Always pass `--cd` explicitly and keep runs inside a git repo; otherwise you need `--skip-git-repo-check` and you lose the guardrail that makes `git diff` a reliable review artifact. Commit or stash before each orchestrated run so the diff is attributable.",
+  "Set `RUST_LOG=error` (the exec default) in normal operation and bump to `RUST_LOG=info` or `codex_core=debug` only when triaging — exec prints logs inline, so verbose levels will pollute your stderr channel.",
+  "Re-verify everything against `codex exec --help`, `codex --help` and `codex app-server generate-json-schema --out ./schemas` on the exact pinned version before wiring it up. The generated schema bundle is version-exact and is the single best contract to code your JSONL/JSON-RPC parsers against."
+ ],
+ "unknowns": [
+  "Whether `--full-auto` still actually parses on `codex exec` in 0.154.0. The docs table lists it (\"Deprecated compatibility flag. Prefer --sandbox workspace-write; Codex prints a warning when this flag is used\") but I could not find it in codex-rs/exec/src/cli.rs, codex-rs/utils/cli/src/shared_options.rs or codex-rs/cli/src/main.rs at tag rust-v0.154.0. VERIFY: `codex exec --help | findstr full-auto`, or `codex exec --full-auto --skip-git-repo-check \"say ok\"` and check for a clap error vs a deprecation warning.",
+  "Whether `-a/--ask-for-approval` is accepted on `codex exec` (it is listed under 'Global flags' in the docs but is only defined on the TUI Cli struct in source; exec hard-sets approval_policy=Never anyway). VERIFY: `codex exec --help | findstr ask-for-approval`. If absent, use `-c approval_policy=never`.",
+  "Real-world `windowDurationMins` values returned for a Plus/Pro account. The docs example shows 15 and 60; the integration test uses 1800 seconds. The 5h/weekly mapping is inferred from the TUI label function (300 min => \"5h\", 10080 => \"weekly\"). VERIFY: after logging in, run `codex app-server` and send account/rateLimits/read, and read the actual windowDurationMins for primary and secondary.",
+  "Whether `account/rateLimits/read` and `account/usage/read` require `capabilities.experimentalApi = true`. They are not marked experimental in the docs' API overview, but several sibling methods are. VERIFY: send `initialize` without capabilities, then `account/rateLimits/read`; if it errors with '<descriptor> requires experimentalApi capability', re-initialize with experimentalApi: true.",
+  "Whether `GET https://chatgpt.com/backend-api/wham/usage` is rate-limited or will 403 a non-CLI User-Agent. It is an internal endpoint with no public contract. VERIFY: call it once with the exact headers the CLI sends (User-Agent: codex-cli) and compare the body to what account/rateLimits/read returns.",
+  "Exact clap exit code for argument errors (I asserted 2 from clap's default, not from Codex source). VERIFY: `codex exec --nonsense-flag; echo $LASTEXITCODE`.",
+  "Whether the Windows `elevated` sandbox setup will complete on this specific machine (needs admin approval for local user/group creation, firewall rules, and sandbox-user logon rights; enterprise policy or a declined UAC prompt forces the weaker `unelevated` fallback). VERIFY: run `codex` once interactively, accept the sandbox setup prompt (or `/setup-default-sandbox`), then check `/status` and C:\\Users\\pegan\\.codex\\.sandbox\\sandbox.log.",
+  "Whether a thread NAME set via app-server `thread/name/set` is reliably resolvable by `codex exec resume <name>` across processes, and how collisions are handled (the CLI docs say session IDs take precedence over names, and `codex delete --force` refuses non-UUIDs). VERIFY: set a name, then `codex exec resume <that-name> \"ping\"` from a fresh shell.",
+  "Whether `--ephemeral` suppresses the `thread.started` event or just the on-disk rollout (it should still emit the id but the thread will not be resumable). VERIFY: `codex exec --ephemeral --json \"say ok\"` and check for thread.started, then try resuming that id.",
+  "Whether `-o/--output-last-message` writes the schema-conformant JSON (not prose) when combined with `--output-schema`. The docs' example implies yes. VERIFY: run the documented `codex exec \"Extract project metadata\" --output-schema ./schema.json -o ./project-metadata.json` and inspect the file.",
+  "Concrete weekly-limit numbers per plan. The pricing page gives only 5-hour message ESTIMATES and says 'Weekly limits may also apply' without publishing the weekly figures. The only authoritative source is the account's own usage read. VERIFY: read secondary window usedPercent/resetsAt from account/rateLimits/read over a few days.",
+  "Whether OpenAI considers a single-user local orchestrator (not CI, not a distributed product) driving codex exec on a ChatGPT Plus/Pro login to be squarely permitted. The CI guide's constraints imply yes, and staff comments are permissive about forking, but no doc says it in those words, and the discussion-thread questions closest to commercial embedding (2026-02-07, 2026-05-05) are unanswered. VERIFY: ask OpenAI support/account team directly if the answer needs to be load-bearing.",
+  "Whether any `requirements.toml` / MDM managed configuration is present on this Windows 11 machine that would restrict login method, sandbox mode, or approval policy. VERIFY (after install): `codex doctor` and the TUI `/debug-config`, which prints layer order plus allowed_approval_policies / allowed_sandbox_modes / mcp_servers / rules."
+ ]
+}

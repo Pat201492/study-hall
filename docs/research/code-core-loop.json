@@ -1,0 +1,281 @@
+{
+ "key": "core-loop",
+ "summary": "claude-study-room is a single-process \"Protector\" that drives N GitHub repos as boards: every ~20s heartbeat (index.ts:51) it re-ingests open issues into a per-repo TaskMap, fetches issues+open PRs, runs a pure classifier (classify.ts) that emits at most ONE action per board item on a fixed ladder (MERGE>FIX>RESOLVE>REVIEW>PROMOTE>NEEDS_DETAIL>TRIAGE>IMPLEMENT), fair-share-interleaves the per-repo action lists, and dispatches each action onto a \"warm worker\" chosen by a pure assignment ladder (protector.ts: exact → rerole → cross-repo → spawn → wait). Each dispatched action spawns a `claude -p` process (via the Harness seam) in a fresh per-task git worktree, then commits/pushes and opens or updates a PR via `gh`. Governance (watchdog attempt counters, quarantine + parole, capacity/blackout pauses, contention throttle, file-ownership holds, test-run budget, soft drain) is global and cross-board; item state (taskmap, handled, quarantine, attempts, lifetime, clone, spec) is per-repo in a RepoState bundle (repoState.ts). All durable state lives under C:\\Users\\pegan\\.claude-study-room, one directory per CONFIGURED repo URL with `[/:]` replaced by `-`, plus a handful of global files (engine.log, usage.jsonl, drain.flag, testrun.json, admissions.json). Every key that crosses a board boundary is repo-qualified: `owner/name#7` (flight/task), `owner/name:pr-12` (item), `FIX:owner/name:pr-12` (action). The scheduling/policy brains are genuinely pure and unit-tested (protector, classify, gates, ownership, throttle, assignments, watchdog, parole, schedule, tierFallback, optimizer); everything impure — orchestration, git, gh, process spawn, persistence sequencing, telemetry, reporting — is fused into live.ts, a 2713-line god class with ~45 private methods. The headline gap: the warm-session machinery the whole project exists for (`--session-id` / `--resume --fork-session`, warmCliSession.ts) is wired only into the Editor; the live board loop constructs the Protector with no `attach` hook and passes no session id, so every \"warm worker\" is in fact a cold `claude -p` run and the ladder's exact/rerole/cross-repo tallies measure warmth that does not exist.",
+ "facts": [
+  "Entry point modes: src/index.ts:45 — `--live` | `--ingest` | default `sim`; also `--editor`, `--editor-all`/`--all`, `--dry-run`, `--config <path>` (default config.json), env RUNNER_REPO override (index.ts:24-25).",
+  "Heartbeat period: src/index.ts:51 `POLL_MS = Number(process.env.POLL_MS) || 20000`. Board re-ingest interval: src/live.ts:92 `REINGEST_MS = 15_000`. Capacity backoff: src/live.ts:95 `CAPACITY_BACKOFF_MS = 5 * 60_000`.",
+  "State root + primary status paths: src/index.ts:53-56 — `statusDir = join(homedir(), '.claude-study-room', (config.repo||'default').replace(/[/:]/g,'-'))`, `statusFile = statusDir/status.json`, `taskMapFile = statusDir/taskmap.json`.",
+  "status.json shape: src/index.ts:58-77 `{updatedAt: ISO, stopped: bool, pool: {...PoolState, maxConcurrent, tiers: config.pool}}` — PoolState is spread deliberately so new fields flow through. Verified on disk at C:\\Users\\pegan\\.claude-study-room\\https---github.com-Pat201492-dungeonworks\\status.json.",
+  "Tick re-entrancy guard: src/index.ts:302-313 — a `ticking` boolean SKIPS (never queues) an overlapping beat; overlapping ticks previously corrupted the shared `this.rs` cursor (2026-08-14 incident documented inline).",
+  "Heartbeat body: src/index.ts:303-318 — reload config from disk every beat, `runner.setDraining(drainRequested())`, `runner.tick()` detached with catch, `writeStatus(runner.snapshot())`, then `if (runner.draining && runner.busy === 0) drainComplete()`.",
+  "Shutdown: src/index.ts:320-330 — SIGINT/SIGTERM → clearInterval, `runner.stop()`, `killAllHarnesses()`, write stopped snapshot, exit 0; `process.on('exit')` also calls killAllHarnesses().",
+  "LiveRunner constructor signature: src/live.ts:186-190 `(config: () => StudyRoomConfig, statusDir: string, taskMapFile: string)` — config is a CALLBACK so every tick re-reads config.json.",
+  "Protector sizing is computed once in the constructor: src/live.ts:204-211 `perTierMax = max(cfg.maxConcurrent, max(pool[t].maxWarm))`, `totalCap = perTierMax * 3`, `worktreeRoot = join(statusDir,'students')`. protector.ts exposes no setter, so live config edits never resize the pool.",
+  "tick() order (src/live.ts:1125-1432): (1) return if !running / draining; (2) staggered per-repo ingest, +2000ms stagger per repo (1136-1140); (3) retierAll per repo (1141); (4) per repo `Promise.all([fetchIssues, listOpenPulls])` then `classify(ri, rp, {autoMerge: canAutoMerge(cfg)})` stamping `.repo` on every action and pull (1156-1168); (5) build onBoard qualified item keys (1173-1174) and openItemsByRepo bare keys (1177-1180); (6) updateDeadlocked / reconcileUnparked / sweepCarveOuts / paroleDue / updateParked / sweepReports (1184-1193); (7) all-repos-fetch-failed handling (1204-1227); (8) fairShare merge (1228); (9) reconcileWatchdog + assess + quarantine + reports + newlyExhausted (1234-1251); (10) capacity pause return (1255); (11) blackout return (1266-1282); (12) per-board contested check, return if every board contested (1295-1316); (13) protector.rebalance(demand) (1322-1331); (14) slot math (1339-1347); (15) dispatch loop (1367-1425); (16) throttle.observe, refreshTokens, watchdog.tickOk (1429-1431).",
+  "Concurrency math: src/live.ts:1339-1347 — ceiling = `effectiveConcurrency(cfg.optimizationMode, cfg.maxConcurrent, cfg.maxParallel)`, `throttle.setCeiling(ceiling)`, `slots = throttle.limit() - inFlight.size - reviewing.size`. MERGE and PROMOTE bypass the slot budget entirely (1378-1383).",
+  "effectiveConcurrency (src/optimizer.ts:35-38): explicit `maxParallel > 0` wins outright; else speed = max(1, base), token = max(1, ceil(base/2)).",
+  "Dispatch loop guards, in order (src/live.ts:1367-1424): quarantined action key OR item key → skip; `specMoved()` → parkSpecChanged + skip; `alreadyRunning()` → skip; PROMOTE → runPromote; MERGE → mergeOne; `slots<=0` → skip; file-collision hold via `collidingPaths(claim, claimed)` → skip WITHOUT consuming a slot; then dispatchCli → `slots -= 1`, `watchdog.attempt(item)`, `saveAttempts` + `saveLifetime` immediately.",
+  "Assignment ladder (src/protector.ts:197-246): 1 exact (same tier+role+repo, warmest by `lastFinishedSeq`), 2 rerole (same tier+repo, victim = free worker whose current role has least REMAINING demand, tie-break warmest — pickRerole 388-396), 3 cross-repo (same tier, other repo; prefers right role), 4 spawn if `countTier(tier) < perTierMax && workers.length < totalCap` (162-164), 5 wait with reason `tier-at-cap` | `pool-at-cap` (242-245).",
+  "Worker shape: src/protector.ts:29-53 — `{id: `${tier}-${seq}`, tier, role, repo?, state: 'busy'|'idle-warm'|'asleep'|'recycling', task, worktree, lastFinishedSeq, healthMisses, session?}`. `occupy()` (184-192) makes role and repo STICKY.",
+  "Role set (src/taskmap.ts:24, re-exported by pool.ts:16,19): `triage | implement | review | fix | rewrite | resolve | merge`. Tiers (pool.ts:20): `haiku | sonnet | opus`.",
+  "Action→role map: src/classify.ts:110-113 — MERGE→merge, FIX→fix, RESOLVE→resolve, REVIEW→review, TRIAGE→triage, IMPLEMENT→implement, PROMOTE→null, NEEDS_DETAIL→null. Rank order: src/classify.ts:61-67 MERGE 0, FIX 1, RESOLVE 2, REVIEW 3, PROMOTE 4, NEEDS_DETAIL 5, TRIAGE 6, IMPLEMENT 7; `RANKED_KINDS` derived from RANK (72-73).",
+  "FIX→rewrite escalation is decided at assignment time, not in classify: src/live.ts:1486-1487 `rewriting = a.kind==='FIX' && watchdog.needsRewrite(itemKey)` → role 'rewrite'; threshold `rewriteAfterAttempts: 5` (watchdog.ts:103).",
+  "Tier selection: issue actions read `rs.taskMap.tasks.find(t => t.id === '#'+n)?.model` then `effectiveTier(model, cfg.pool)` (live.ts:1496-1499); PR actions inherit the implementing issue's tier via `tierForPr` with `?? 'sonnet'` fallback (live.ts:1472-1477).",
+  "effectiveTier (src/tierFallback.ts:13-23): a tier with `maxWarm === 0` is DISABLED; fallback searches upward (stronger) first, then downward; returns input unchanged if nothing is enabled.",
+  "Task tiering rules: src/taskmap.ts:139-144 `tierFor` — pinned keeps `task.model`, else `tierForDifficulty(task.difficulty ?? inferDifficulty(title), mode)`; `retierAll` runs on every board every tick (live.ts:1141).",
+  "Repo-qualified key formats (src/repoState.ts): `qualifyTaskId` = `owner/name#7` (162-164); `qualifyActionKey` = `KIND:owner/name:pr-12` (177-179); `qualifyItemKey` = `owner/name:pr-12` (182-184); `fkey` (in-flight) = `owner/name#124` (212-214); `parseQualifiedKey` regex `^(?:[A-Z]+:)?([^:]+\\/[^:]+):(issue|pr)-(\\d+)$` with a legacy bare `KIND:pr-12` fallback returning slug=null (193-205).",
+  "In-flight tracker key prefixes (all over fkey): implement = bare `owner/name#7` (live.ts:2152); triage = `triage:owner/name#7` (1888); fix = `fix:owner/name#12` (2400) plus `fixing` set; resolve = `resolve:owner/name#12` (2523) plus `resolving` set; review lives ONLY in `reviewing` Map (2274); merge in `merging` Set (1857). `keyInFlight` maps the action-kind prefix back onto these (live.ts:1590-1610).",
+  "Per-repo state dir naming: src/repoState.ts:74-76 `stateDirFor(root, configured) = join(root, (configured||'default').replace(/[/:]/g,'-'))` — takes the CONFIGURED URL, so `https://github.com/Pat201492/x` → `https---github.com-Pat201492-x`. Verified on disk (17 such dirs plus legacy `Pat201492-*` and `default`).",
+  "Per-repo files: `taskmap.json` (repoState.ts:82), `handled.json` = number[] (111,114-124), `quarantine.json` = parole records or legacy string[] (112,126-154), `attempts.json` = Record<qualifiedItemKey, number> (223,251-271), `lifetime.json` = same shape, separate file so an older engine cannot drop the ceiling (228-249), `repo/` clone (live.ts:903), `worktrees/`, and for the primary repo only `status.json`.",
+  "Verified on-disk attempts.json content: `{\"Pat201492/dungeonworks:issue-288\":2,\"Pat201492/dungeonworks:issue-255\":1,\"Pat201492/dungeonworks:pr-298\":1}` — confirms item keys are repo-qualified on disk.",
+  "Attempts/lifetime are filtered to the owning repo on save: repoState.ts:244 and :266 `Object.entries(counts).filter(([k]) => k.startsWith(`${s.slug}:`))` — one Watchdog holds all boards' counters, each file holds only its own.",
+  "Global (non-per-repo) state files under ~/.claude-study-room: `engine.log` and `editor.log` (dashboard.ts:169-170), `editor-auto.json` (171), `scheduled-start.json` (270), `admissions.json` (864), `admissions-split.log` (874), `drain.flag` (drain.ts:26-28), `testrun.json` (testRun.ts:45-47), `usage.jsonl` (usageStore.ts:103-105).",
+  "usage.jsonl row shape (verified on disk): `{ts, repo, item, role, tier, model, harness, fidelity, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, turns, stoppedBy}`; fidelity derived from the harness capability, not the call site (harness.ts:105-107, live.ts:2095-2098).",
+  "taskmap.json task shape (verified on disk): `{id:'#296', title, model:'opus', role:'implement', priority:704, deps:['#252'], pinned:false, assignedStudent:null, stage:'ready', difficulty:'standard', owns:['api/dice.py']}`.",
+  "Stages (src/taskmap.ts:25-27): `ready | implementing | review | fixing | merging | done`; `readyQueue` requires stage==='ready', no assignedStudent, and every dep at 'done' (taskmap.ts:208-212) and is explicitly LABEL-AGNOSTIC — it cannot see parking labels, which is why live.ts:1040-1057 subtracts parked issues before printing the ingest headline.",
+  "Parking labels — the ONE definition (src/classify.ts:166-168): `PARKED_LABELS = [runner-error, spec-changed, needs-human, already-satisfied]`; `isParked()` short-circuits both classifyPull (225) and classifyIssue (259), and a parked ISSUE also suppresses its PR (classify.ts:341-350).",
+  "Deadlock detection: `isDeadlocked` = reviewed-ok/APPROVED AND runner-error (classify.ts:189-193); surfaced per board into `rs.deadlocked` and logged once on ENTRY (live.ts:668-685), never auto-resolved.",
+  "Merge policy is centralised in gates.ts: `normalizeReviewMode` (39-46) fails CLOSED to 'human' for unrecognised values; `canAutoMerge` = autoMerge && mode !== 'human' (141-145) and is the flag fed to classify; `mergeGate` (56-69) orders review verdict before merge gates. index.ts:36-37 warns at boot via `reviewModeIssue`.",
+  "Review verdict parsing: gates.ts:124-133 — last `VERDICT: APPROVE|REQUEST_CHANGES` wins, keyword fallback, default REQUEST_CHANGES (never approves on ambiguity). postVerdict THROWS if the label write fails (live.ts:2356-2363) because the label is the durable verdict.",
+  "Watchdog defaults (src/watchdog.ts:94-112): wedgeTicks 4, fatalWedgeCount 4, fatalErrorStreak 5, maxItemAttempts 9, rewriteAfterAttempts 5, boardChurnLimit 3, probeAttempts 1, lifetimeDispatchCap 15.",
+  "Quarantine is two-layered and durable: quarantine.json + a `runner-error` label on the item itself (live.ts:227-290); `quarantineItem` additionally files a deduped GitHub report via `openIssueOnce` to `cfg.reportRepo` (live.ts:296-337). Default reportRepo is `Pat201492/claude-study-room` (config.ts:199).",
+  "Parole: a quarantine is a SENTENCE not a life term — `reoffend()` lengthens it, `dueForParole` releases on PROBATION with `watchdog.probe(itemKey)` (1 dispatch), and `lifetimeExhausted` (cap 15) blocks parole permanently (live.ts:763-802, parole.ts).",
+  "Capacity handling: `noteCapacityBlocked` parses the CLI's own reset time via `parseCapacityReset(msg, now)` and falls back to the 5-minute flat backoff (live.ts:597-613); GitHub-side all-repo failure uses `githubRateLimitReset()` clamped to [now+30s, now+1h] (live.ts:1212-1221) and calls `tickOk()` — never `tickError()` — so an outage cannot kill the engine.",
+  "Infra failures (CLI never started) reuse `capacityFailed` so reconcileWatchdog forgives BOTH the no-progress counter and the attempt budget (live.ts:624-636, 1663-1671); `infraStreak` resets on any student that completes (live.ts:2118).",
+  "Throttle (src/throttle.ts): contention = RESOLVE dispatches + re-dispatches this tick (live.ts:1364,1411-1412,1429); >contentionThreshold(1) shrinks the effective cap by 1, 3 consecutive clean ticks grow it by 1, never above the operator ceiling.",
+  "File-ownership hold (#177): `claimsFiles` = IMPLEMENT|FIX|RESOLVE only (live.ts:1437-1439); claim = issue's `Owns:` globs for an issue, PR's changed `files` ∪ its issue's owns for a PR (1445-1461); collisions computed by `collidingPaths` and held without consuming a slot; held claims persist in `inFlightFiles` keyed by action key and are pruned via `keyInFlight` (1355-1357).",
+  "Fair share across repos: `fairShare(byRepo, offset)` (classify.ts:86-102) walks RANKED_KINDS, round-robins repos within each rank, and rotates the starting repo by an incrementing cursor (live.ts:1556-1558).",
+  "Soft stop: drain.flag file (drain.ts) checked EVERY beat (not latched) so cancelling resumes without restart (index.ts:307); `busy = inFlight.size + reviewing.size + merging.size` (live.ts:1079-1081); drainComplete clears the flag then exits 0 (index.ts:276-283). `merging.delete` is in a `finally` because leaving it made busy===0 unreachable (live.ts:1840-1867).",
+  "Bounded test run: `noteTestRunUnit` counts 'pr' or 'merge' completions and, when the budget is spent, clears testrun.json and calls `requestDrain()` — reusing the soft stop rather than a second stop concept (live.ts:1097-1108).",
+  "Blackout window: `inBlackout(new Date(), cfg.blackout)` holds dispatch, logs only on the edges, and returns before dispatch (live.ts:1265-1282); config.json currently sets 22:00-23:00 enabled.",
+  "Harness seam: `getHarness(id = 'claude-code')` throws on an unknown id rather than falling back (harness.ts:137-144); registry populated by importing harnesses.ts (harnesses.ts:21-24, registers claude-code and opencode). Every call site in live.ts calls `getHarness()` with NO id — config-driven harness routing is not wired.",
+  "Harness run options actually passed by live.ts: `{onUsage, cwd, model: cfg.pool[tier].model, permissionMode, claudeBin, tools: cfg.studentTools, onIdleKill, budget?: cfg.studentBudget?.implement, onBudgetStop?}` (live.ts:1899-1909, 2171-2184, 2298-2308, 2445-2455, 2566-2576). No `sessionId`, `resume`, or `forkSession` anywhere in live.ts.",
+  "Per-task worktrees are created fresh per dispatch: implement → `addWorktree(rs.clone, 'study/issue-<n>')` (live.ts:2163-2165), review → `study/review-issue-<n>` (2292-2294), fix/resolve → `addWorktreeForBranch(rs.clone, pr.headRefName)` (2422, 2541); all clone-level git is serialized through `lockGit` (live.ts:221-225).",
+  "PR branch convention: `study/issue-<n>`; the issue behind a PR is parsed from the head branch by `pullIssueNumber` (classify.ts:125-128, regex `issue[-/](\\d+)`) and `issueNumFromBranch` (live.ts:99-102).",
+  "Progress signature used by the watchdog: PR = `${mergeable}|${statusCheckRollup}|${reviewDecision}|${sortedLabels}`; issue = `issue|handled=<bool>` (live.ts:1579-1586). Same key + same signature after an attempt finishes = no progress → bump.",
+  "releaseConverged (live.ts:1620-1641): any quarantined PR that has since earned `reviewed-ok` is released, its attempt + lifetime counters cleared, and its `runner-error` label removed — run FIRST inside reconcileWatchdog.",
+  "reconcileUnparked (live.ts:720-753): an item whose parking label a human removed is returned to the board mid-run (no restart), released on PROBATION via `watchdog.probe`, not a full budget reset.",
+  "sweepCarveOuts (live.ts:437-474) parks carve-out children whose parent was closed as COMPLETED by a PR, BEFORE a dispatch is spent; sweepReports (live.ts:391-418) closes watchdog reports whose subject item has left the board, throttled by `sweepDue`.",
+  "Empty-diff handling: `classifyEmptyRun(result.text)` — 'satisfied' → parkAlreadySatisfied (label + comment, never auto-close); 'blocked'/'unknown' → stage back to 'ready' for retry (live.ts:2223-2237).",
+  "Triage flow: the student PROPOSES, the orchestrator FILES — `parseTriage` → openIssue per piece → `expectedDifficulty(auditSignals(...))` label per child → `addIssueDeps(parent, filed)` → comment → `EPIC_LABEL` on the parent; aborts and leaves the issue intact if fewer than 2 pieces filed (live.ts:1894-2010).",
+  "Attribution matrix is role × tier in memory (`AttributionCell {tasks, tokens, cost, cacheReadTokens, cacheInputTokens}`, pool.ts:38-46) and is NOT persisted; the durable spend record is usage.jsonl via `recordUsageToStore` (live.ts:2072-2099).",
+  "snapshot() (live.ts:2641-2692) returns `{running, students: [active…, warm…], attribution, protector: AssignmentSnapshot, parallelism:{effective, configured}, boardHealth:{deadlocked, parked}, capacity?:{pausedUntil, reason}}`; idle workers are rendered from `protector.pool` with last-known token/cache values.",
+  "AssignmentLog (assignments.ts) is a pure ring buffer, `MAX_RECENT = 200`, tallies `{exact, rerole, crossRepo, spawn, wait, total, warmReuseRate}` where warmReuseRate = (exact+rerole+crossRepo)/placed and waits are excluded from the denominator (assignments.ts:118-127).",
+  "boot() (live.ts:824-846): builds a RepoState per configured slug under the SAME root (`dirname(statusDir)`), then per repo `bootOne`: ensureClone → reapOrphanWorktrees → ensureLabels → readSpec → loadQuarantine → seedAttempts (disk + `rejectedReviewCount` per open PR) → ingest → reconcileHandled (boot-only, deliberately).",
+  "readSpec (live.ts:964-989) deliberately does NOT send CLAUDE.md (the CLI injects it; measured +14,531 tokens for a 56,558-char file) — only a guard telling the student not to re-read it — and sends docs/SPEC.md only when it differs from CLAUDE.md.",
+  "Test suite: 58 test files under test/, run with `node --import tsx --test test/*.test.ts` (package.json). The pure modules each have a dedicated test (protector, classify, gates, ownership, assignments, fairShare, repoState, parole, schedule, drain, probeBudget, releaseConverged, crossRepoKeys, specCollision, sharedCursor, statusSnapshot…). No test file targets live.ts as a whole.",
+  "config.json defaults (config.ts:186-200): repo '', optimizationMode 'token', reviewMode 'auto', maxConcurrent 4, pool {haiku/sonnet/opus maxWarm 3}, claudeBin 'claude', permissionMode 'bypassPermissions', reportRepo 'Pat201492/claude-study-room'. Live config.json: repos = [Pat201492/equipworks, Pat201492/dungeonworks], maxConcurrent 2, maxParallel 2, autoMerge true.",
+  "`configuredRepos(cfg)` — `repos` (multi) wins over `repo` (single), never merged (config.ts:277); `repoIssues(cfg)` returns unparseable entries which index.ts:258-260 logs loudly."
+ ],
+ "reusable": [
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\protector.ts",
+   "what": "The whole warm-pool scheduling brain: Worker/Task types, the 5-rung assignment ladder, rebalance(), warmTargets/demandByTierRole, reconcileWarm, healthCheck/recycle.",
+   "why_keep": "Pure, deterministic, no clock/network/IO, 412 lines, fully covered by test/protector.test.ts (16KB). It is the single best-factored file in the repo and the conceptual core of v2.",
+   "coupling": "Imports only `Tier` from pricing.ts and `ROLES/TIERS/Role` from pool.ts (which itself re-exports Role from taskmap.ts). Lifts out with a 3-line types shim."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\classify.ts",
+   "what": "The board ladder: classify(issues, pulls, cfg) → one BoardAction per item, RANK/RANKED_KINDS, fairShare(), PARKED_LABELS/isParked/parkedReasons/parkedItems, isDeadlocked/deadlockedPulls, pullIssueNumber.",
+   "why_keep": "Pure over fetched data, encodes years of hard-won board semantics (epic suppression, parked-issue-suppresses-its-PR, audit-before-triage ordering) each with an incident cited inline. test/classify.test.ts is 16KB.",
+   "coupling": "Type-only on github.ts (RawIssue/OpenPull) plus value imports of needsTriage/EPIC_LABEL (triage.ts), auditIssue/NEEDS_DETAIL_LABEL (issueAudit.ts), NEEDS_HUMAN_LABEL (buildability.ts), parseDeps (github.ts). All of those are themselves pure."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\gates.ts",
+   "what": "Merge/resolve/fix/review gates plus normalizeReviewMode, canAutoMerge, parseVerdict.",
+   "why_keep": "These six functions ARE the safety rules (what may merge unattended, what a human owns, what an ambiguous review means) and they fail closed by construction. 145 lines, no deps beyond two types.",
+   "coupling": "Type-only: StudyRoomConfig (Pick of 2 fields) and OpenPull."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\repoState.ts",
+   "what": "The RepoState bundle + all repo-qualified key builders/parsers (qualifyTaskId/ActionKey/ItemKey, parseQualifiedKey, fkey, stateDirFor, taskMapPathFor) and the per-repo persistence for handled/quarantine/attempts/lifetime.",
+   "why_keep": "The key-format decisions are the load-bearing multi-repo invariant; parseQualifiedKey's requirement that a slug contain '/' is the fix for a real bug (a legacy key read as a repo named after its action). The on-disk formats are already stable and a v2 wants to read them.",
+   "coupling": "node:fs + logger + type-only imports of RepoClone/TaskMap/DeadlockedPr/ParkedItem/ParoleRecord. Split the key helpers (pure) from the load/save half (fs) and the pure half is dependency-free."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\ownership.ts",
+   "what": "File-ownership scheduling: ownershipList, ownedByOthers, ownKey, pathMatchesOwn, collidingPaths, holdColliding, CONTENDED_PATHS.",
+   "why_keep": "Pure, zero-dependency, and holdColliding is a general greedy resource-claim scheduler that v2 can reuse verbatim for any conflict-avoidance policy.",
+   "coupling": "One type-only import (Task from taskmap.ts) used by two of the seven functions."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\throttle.ts",
+   "what": "Adaptive parallelism: shrink-on-contention / recover-on-clean-streak with the operator's max as a hard ceiling.",
+   "why_keep": "95 lines, pure, self-contained class with an explicit asymmetric (fast-shrink, slow-recover) policy and setCeiling for live config edits — the ONE place in the engine that already handles live reconfiguration correctly.",
+   "coupling": "None. Zero imports."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\assignments.ts",
+   "what": "AssignmentLog ring buffer + LadderTallies (warmReuseRate KPI) + warmMap(supply vs demand grid).",
+   "why_keep": "Pure, no clock of its own (callers pass `at`), replay-safe, and it is the only instrument that answers 'is the warm pool earning its keep?'.",
+   "coupling": "Type-only on pricing/pool/protector."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\watchdog.ts",
+   "what": "Attempt counters (per-action no-progress ladder + per-item oscillation cap + lifetime dispatch ceiling), board-churn fingerprints, escalation to quarantine/kill.",
+   "why_keep": "The governance model (three independent ladders, each from a distinct real failure) is the most valuable non-obvious design in the repo; snapshots serialize to the exact on-disk attempts/lifetime formats.",
+   "coupling": "In-memory only, pure over inputs; the persistence lives in repoState.ts. Its API surface is wide (~30 methods) and its key vocabulary (action key vs item key) must be preserved."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\parole.ts",
+   "what": "Quarantine sentences with escalating duration, reoffend/dueForParole/sentenceMs/firstOffence, and the parse/serialize that tolerates the legacy bare string[] quarantine.json.",
+   "why_keep": "Cause-agnostic release is the right answer to 'every novel outage condemns the board'; the legacy-shape tolerance means v2 can read existing state dirs.",
+   "coupling": "Pure, no imports of consequence."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\drain.ts",
+   "what": "File-flag soft stop: drainFlagPath/requestDrain/clearDrain/drainRequested.",
+   "why_keep": "53 lines, and the rationale (two processes with no channel; Windows has no usable SIGTERM for a console child; a flag survives a dashboard restart) still holds for v2 on Windows.",
+   "coupling": "node:fs/os/path only. Directly portable."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\schedule.ts",
+   "what": "Deferred-start policy: validateDelayMinutes, fmtDelay, scheduleRestoreAction (arm/fire-within-grace/discard/invalid).",
+   "why_keep": "Pure policy deliberately extracted from dashboard.ts precisely so it could be tested; the 'discard a stale schedule rather than fire it late' rule is a real safety property (it spends plan usage).",
+   "coupling": "None."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\tierFallback.ts",
+   "what": "effectiveTier — maxWarm 0 disables a tier, route up then down.",
+   "why_keep": "24 lines that give operators a single-knob way to steer all work onto one model.",
+   "coupling": "TIERS from pool.ts, Tier from pricing.ts."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\harness.ts + src\\harnesses.ts",
+   "what": "Capability-declaring Harness seam: HarnessCapabilities {warmSessions, seedableSessions, cacheUsageSplit, toolAllowlist, budgetStop}, registry, fidelityFor, killAllHarnesses, unknown-id-throws resolution.",
+   "why_keep": "The argument against a lowest-common-denominator interface (harness.ts:11-29) is the correct one for this project, and fidelityFor prevents an adapter silently corrupting cost data.",
+   "coupling": "HarnessRunOptions is aliased straight to cliStudent's RunCliTaskOptions — a genuine leak that v2 should close, but the capability model itself is portable."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\taskmap.ts",
+   "what": "Task/TaskMap types, dep-cycle-safe edit ops, isBlocked/readyQueue/nextForTier, tierFor/retierAll, effortForTask.",
+   "why_keep": "The DAG semantics and the difficulty→tier→effort derivation are reusable; the JSON shape is already on disk in 17 repo dirs.",
+   "coupling": "fs for load/save (separable), plus difficulty.ts and config's OptimizationMode."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\optimizer.ts",
+   "what": "effectiveConcurrency + deriveTaskParams — the speed/token objective → (model, effort, fastMode, warmCount).",
+   "why_keep": "53 lines, pure, and the single definition of what the optimization toggle means.",
+   "coupling": "Tier type only."
+  }
+ ],
+ "pain_points": [
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "The warm pool is not actually warm in the live board loop. The Protector is constructed with NO `attach` hook (live.ts:206-211) and no live.ts harness call passes sessionId/resume/forkSession (1899-1909, 2171-2184, 2298-2308, 2445-2455, 2566-2576), so every dispatch is a cold `claude -p`. `Worker.worktree` (protector.ts:46,175) is never read — worktrees are created per task by addWorktree. warmCliSession.ts is imported only by editor.ts.",
+   "evidence": "grep across src/: `warmCliSession` appears only in editor.ts:5,365; no `sessionId`/`forkSession` in live.ts; `this.protector` usage in live.ts is limited to rebalance/assignOne/finish/pool (lines 1323, 1772-1773, 1804-1830, 2133, 2659-2678)."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "live.ts is a 2713-line god class: ~45 private methods mixing orchestration, git, gh, process lifecycle, persistence, telemetry, GitHub issue authorship (report bodies as inline string arrays), and dashboard snapshotting. No test targets it directly; every pure rule it depends on had to be extracted elsewhere to be testable at all (classify.fairShare's comment at classify.ts:82-85 records that the test previously asserted a hand-copied duplicate).",
+   "evidence": "wc -l src/live.ts = 2713 (145,589 bytes); test/ has 58 files, none named live*.test.ts."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "`saveHandled()` always persists the PRIMARY repo (live.ts:814-816 `persistHandled(this.rs)`), but runTask calls it after mutating a possibly-secondary repo's set (live.ts:2207-2208 `rs.handled.add(n); this.saveHandled();`). A secondary board's handled.json is therefore never written, so after a restart its already-PR'd issues are not remembered (only the live open-PR fetch prevents a re-dispatch).",
+   "evidence": "live.ts:814-816 vs live.ts:2207-2208; contrast with saveQuarantineFor(rs) which exists precisely for this reason (live.ts:267-271)."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "`parkSpecChanged` mutates the ACTION's repo state but persists the primary's: `const rs = this.rsFor(a); … rs.quarantined.add(item); this.saveQuarantine();` — saveQuarantine() writes this.rs (live.ts:263-265). A spec-changed park on a secondary board survives only in memory.",
+   "evidence": "live.ts:363-376, specifically line 369."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "`this.rs` is a mutable cursor that boot swaps in and out (`bootRepo`: save prev, assign rs, restore in finally) purely so synchronous helpers like loadQuarantine/saveHandled can find 'the current repo'. The file's own comments admit this only works by an ordering accident and that the same pattern already caused a cross-board data corruption on 2026-08-14.",
+   "evidence": "live.ts:881-900 (bootRepo + the bootOne docblock), live.ts:994-1004 (the ingest docblock), index.ts:285-302 (the re-entrancy guard added in response)."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\index.ts",
+   "issue": "status.json is written to the PRIMARY repo's dir only (index.ts:53-56, 76) while snapshot() aggregates students, boardHealth and assignments across every repo (live.ts:2673-2691). The dashboard reads the same single path (dashboard.ts:107). Secondary repos' state dirs contain a stale or absent status.json (verified: several repo dirs have no status.json at all).",
+   "evidence": "index.ts:53-56; dashboard.ts:107; on-disk: fitworks/PoolWorks/cardworks dirs have taskmap.json + attempts.json but no status.json."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "Protector capacity is frozen at construction. perTierMax/totalCap are computed once from cfg.maxConcurrent and pool[*].maxWarm (live.ts:204-211) and protector.ts exposes no setter, so changing pool sizes in the dashboard has no effect until restart — even though the engine re-reads config.json every beat and Throttle.setCeiling IS updated per tick (live.ts:1340).",
+   "evidence": "live.ts:204-216; protector.ts:139-149 (cfg is `readonly`, set once)."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\protector.ts",
+   "issue": "reconcileWarm(), healthCheck(), recycle(), and sleep() — the health/recycle half of the advertised Protector — are never called from src/ (only from test/protector.test.ts). Nothing ever pre-warms, parks asleep, or recycles a wedged worker in production; workers only ever go busy→idle-warm.",
+   "evidence": "repo-wide grep for reconcileWarm/healthCheck(/.recycle( matches only protector.ts definitions and test/protector.test.ts."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "Double GitHub fetch per ingest tick: `ingest(rs)` calls fetchIssues (live.ts:1007) and then the classify loop immediately calls fetchIssues again for the same repo (live.ts:1158). On a 15s re-ingest clock against a 20s heartbeat this roughly doubles issue-list API calls on most ticks.",
+   "evidence": "live.ts:1136-1140 then live.ts:1156-1158."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "The Task Map is advertised as the editable plan but is overwritten wholesale from GitHub every ingest (`rs.taskMap = fresh; saveTaskMap(...)`, live.ts:1008-1015). Dashboard edits — priority, pinned, role, added deps — are lost within 15 seconds; only `stage` is partially reconstructed (from inFlight/handled). In live mode the map is a derived cache, not a plan.",
+   "evidence": "live.ts:1008-1015; taskmap.ts:86-130 edit ops exist for a map nothing preserves; pool.ts:200-213 documents the opposite contract for sim mode."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "Telemetry mis-attribution on multi-repo: rebalance records and the warm map are stamped with `repoSlug(cfg.repo)` (the primary board) regardless of which board's demand drove them (live.ts:1325, 2678), even though the per-assignment record was fixed to use `this.rsFor(a).slug` (1780).",
+   "evidence": "live.ts:1324-1327 and live.ts:2677-2679."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "Four near-identical role runners (runTask 2161-2243, runReview 2288-2332, runFix 2417-2505, runResolve 2537-2627) each re-implement: worktree add → harness run with the same 7 options → recordUsage → prState staleness check → commit/push → removeWorktree in finally. runRole (2105-2136) factored out only the register/deregister/free skeleton; the ~100-line bodies stayed duplicated and have already drifted (the resolve path historically skipped the pool-grid token update — fixed at 2578-2584 with a comment saying so).",
+   "evidence": "live.ts:2020-2026 explicitly documents the copy-paste and the drift it caused."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "BoardAction is extended by casting: the repo stamp is attached as `{...a, repo: rs.slug}` (1167-1168) and read back via `(a as BoardAction & {repo?: string}).repo` (1531), and synthetic actions are built with `as unknown as BoardAction` in five launch* methods. The repo field is load-bearing for every key, yet it is not in the type.",
+   "evidence": "live.ts:1167-1168, 1530-1533, 1886, 2149, 2271, 2396, 2427, 2519."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\classify.ts",
+   "issue": "Two disagreeing definitions of 'what will run': classify() honours parking labels, readyQueue() cannot see labels at all (taskmap.ts:200-207). live.ts works around it by subtracting parked issues when printing the ingest headline (1040-1057) — a per-caller patch rather than one source of truth.",
+   "evidence": "taskmap.ts:200-212; live.ts:1029-1057."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "Dead/near-dead surface: `quarantine(key, cfg)` never uses its cfg parameter (273-290); `parseActionKey`/`parseItemKey` (66-75) are exported legacy parsers superseded by parseQualifiedKey; `this.taskMapFile` is only a fallback for the first repo (853-855); the constructor's taskMapPath indirection coexists with three direct `join(rs.stateDir, 'taskmap.json')` call sites (1015, 583, and taskMapPathFor).",
+   "evidence": "live.ts:273, 66-75, 853-855, 1015, 583."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "`getHarness()` is always called with no argument, so the OpenCode adapter registered in harnesses.ts is addressable but unreachable — harness selection by config (the stated #300) is unimplemented, and the fidelity/capability machinery has only one real consumer.",
+   "evidence": "live.ts:1199, 1899, 2095, 2126, 2171, 2298, 2445, 2566 all call getHarness() bare; harnesses.ts:22-24 comment 'Registered, not routed'."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room",
+   "issue": "The on-disk state root has accumulated two generations of naming plus scratch: `Pat201492-<repo>` (slug-form, the Editor's scheme) alongside `https---github.com-Pat201492-<repo>` (configured-URL form, the engine's), a `default/` dir, `https---given-Pat201492-trainopoly`, and .bak/.bak2 copies of attempts.json and quarantine.json. repoState.ts:62-73 documents why the URL form won but nothing migrates or prunes the old dirs.",
+   "evidence": "ls of C:\\Users\\pegan\\.claude-study-room: 17 Pat201492-* dirs, 12 https---github.com-* dirs, default/, https---given-*, plus attempts.json.bak/.bak2 and quarantine.json.bak/.bak2 under test-tracker and Trader-Screener."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts",
+   "issue": "engine.log is unbounded and large (5.2 MB on disk) and there is no rotation anywhere in src/; the dashboard tails it by path (dashboard.ts:169).",
+   "evidence": "C:\\Users\\pegan\\.claude-study-room\\engine.log = 5,208,011 bytes; no rotation logic in src/logger.ts (20 lines)."
+  }
+ ],
+ "v2_implications": [
+  "KEEP VERBATIM the pure core: protector.ts, classify.ts, gates.ts, ownership.ts, throttle.ts, assignments.ts, parole.ts, schedule.ts, tierFallback.ts, optimizer.ts, plus the key helpers from repoState.ts. These are already the shape v2 wants (no clock, no IO, caller-supplied `at`), carry incident-derived rules that would be expensive to rediscover, and ship with real tests. Port them first and let the new orchestrator be written against them.",
+  "KEEP the key vocabulary exactly: `owner/name#7` (flight/task), `owner/name:pr-12` (item), `KIND:owner/name:pr-12` (action). Three distinct counters key off the item vs action distinction (no-progress ladder on actions, oscillation cap and lifetime cap on items) and collapsing them re-opens two bugs the comments document (a fix↔review ping-pong that no per-action counter can see; a quarantine deleted one tick after it was written because trackedItems() returned qualified keys matched against bare ones).",
+  "KEEP the on-disk contract if v2 must run against existing boards: per-repo dir named from the CONFIGURED URL with `[/:]`→`-`, containing taskmap.json / handled.json (number[]) / quarantine.json (parole records, legacy string[] tolerated) / attempts.json / lifetime.json / repo/ / worktrees/. attempts and lifetime MUST stay separate files (repoState.ts:224-228 explains: a widened attempts.json silently drops the ceiling for an older engine).",
+  "DECIDE FIRST whether v2 is a warm-pool engine at all. Today it is not: the live loop spawns a cold `claude -p` per action and the Protector is pure bookkeeping. Either (a) wire warmCliSession into the dispatch path — give Worker a real session id, pass `--session-id` on first use and `--resume --fork-session` after, and make the worker's worktree its own rather than per-task — which makes the exact/rerole/cross-repo ladder mean something; or (b) drop the warm-pool framing and keep the Protector purely as a fair, cap-respecting (tier, role) allocator. Shipping the current middle state means the project's headline claim is unmeasured, and `warmReuseRate` in status.json is currently a number about nothing.",
+  "RE-CUT live.ts along the seams it already implies, with the repo made explicit instead of ambient. Suggested split: (1) BoardCycle — fetch/classify/fairShare/dispatch-loop, pure over an injected GitHub port; (2) RoleRunner — ONE parameterised runner (prompt builder, worktree strategy, post-run effect) replacing runTask/runReview/runFix/runResolve/runTriage; (3) Governance — watchdog + quarantine + parole + capacity + blackout + throttle, taking and returning decisions rather than performing IO; (4) Persistence — every save*() takes the RepoState it writes; (5) Reporting — the GitHub issue bodies currently inlined as string arrays. Delete `this.rs` entirely: pass RepoState as a parameter everywhere (bootOne/ingest/reconcileHandled already do, and their docblocks explain why).",
+  "MAKE the repo a typed field on BoardAction (and on the fetched PR) instead of a cast-on cast-off property. Every multi-repo bug listed in live.ts's comments — wrong task map consulted, wrong ledger read, report filed against the wrong repo, assignment attributed to the wrong board — is the same defect wearing different clothes, and it recurs because the type system was opted out of at the stamp site (live.ts:1167) and the read site (1531).",
+  "FIX the three remaining primary-repo leaks during the port, not after: saveHandled (live.ts:814), parkSpecChanged's saveQuarantine (369), and the rebalance/warmMap repo stamps (1325, 2678). Also make status.json either per-repo or explicitly one aggregate file at the root — the current 'aggregate content at the primary repo's path' is neither.",
+  "MAKE runtime reconfiguration uniform. Throttle.setCeiling is updated every tick; Protector caps are not; the Task Map is overwritten from GitHub every ingest. v2 should state, per knob, whether it is operator-owned (config, survives ingest), derived (recomputed each tick), or hybrid — and enforce it. Concretely: if Task Map pinning is meant to be a control surface, pins must be merged into the freshly ingested map, not clobbered by it.",
+  "KEEP the governance ladders and their asymmetries — they encode real money. Fast-shrink/slow-recover throttling; forgive-don't-charge for capacity and infra failures (with the attempt BUDGET refunded, not just the no-progress counter — live.ts:1655-1671); release on probation (1 dispatch) rather than a full budget reset; a lifetime dispatch cap that parole cannot launder; park-don't-close for already-satisfied work; never auto-resolve a reviewed-ok+runner-error deadlock. Each of these has a dated incident attached in-comment.",
+  "KEEP the classifier's one-action-per-item invariant and its ordering (NEEDS_DETAIL > TRIAGE > IMPLEMENT; parked issue suppresses its PR; epic is a tracker never a unit of work). Derive any second ordering (the multi-repo walk) from RANK rather than restating it — classify.ts:72-73 already does this and explains why.",
+  "KEEP the harness capability model (declared, inspectable, unknown-id-throws, fidelity derived from capability) but CLOSE its leak: HarnessRunOptions is currently an alias of cliStudent's RunCliTaskOptions, so `claudeBin` and the Claude-specific option surface are baked into the interface. v2 should define a harness-neutral run options type with an escape hatch for harness-specific flags, and actually route `cfg.harness` through getHarness(id) so the second adapter is reachable.",
+  "KEEP prompt/spec economics: do not re-send CLAUDE.md (the CLI injects it; +14.5k tokens measured for one repo), keep the anti-re-read guard, keep sending docs/SPEC.md only when it differs, keep the tool allowlist (measured -11,382 tokens/turn), keep budgetStop banking partial work. These are the measured wins and none of them live in the parts worth rewriting.",
+  "DROP or quarantine the sim: pool.ts carries a full random-walk student simulator (tick(), spawnStudent, STAGE_FOR_ROLE) that exists only to demo the dashboard, yet PoolState/Student/AttributionMatrix — the types the live engine and dashboard both depend on — live in the same file. Split the shared types out of the simulation before porting, or v2 inherits Math.random() in its core type module.",
+  "DECIDE the single-process-N-boards rule deliberately: the comment at live.ts:818-823 and repoState.ts:9-19 argue correctly that N engines cannot share an account-wide rate limit. Keep one process, one budget, N RepoStates — and make that structural in v2 (a Board array owned by an Engine) rather than a Map bolted beside a legacy `rs` cursor.",
+  "ADD the test level that is missing: every pure rule is tested and the 2713-line integrator is not. v2's orchestrator should be written so the tick is a pure function of (board snapshot, state, clock) → (decisions), with effects applied by a thin executor — which makes the heartbeat itself testable and would have caught the primary-repo persistence leaks above."
+ ],
+ "open_questions": [
+  "Is the warm-session gap intentional (deferred as #125/#121, both referenced as still open in protector.ts:20-25) or a regression? protector.ts states plainly that the repo spec is loaded into `this.spec` and 'nothing consumes it', which would make cross-repo reuse free — but readSpec's output IS passed into every prompt (taskPrompt/reviewPrompt/…), so the comment and the code now disagree.",
+  "Should status.json be per-repo or one aggregate at the state root? snapshot() is already cross-repo; the dashboard reads one primary path; secondary repo dirs have no status.json at all. Which way v2 goes changes the dashboard contract.",
+  "Are the legacy `Pat201492-<repo>` state dirs still read by anything (editorAll.ts:60 builds slug-form dirs for the Editor), or are they dead and safe to drop in v2's migration?",
+  "What is the intended lifetime of `admissions.json`, `admissions-split.log`, and the top-level *-dryrun.ts scripts (ac-tiering-dryrun, admissions-dryrun, audit-dryrun, blocked-impact, card-dryrun, park-propagation, relabel-issues, untriage-oversized)? They are outside src/ and were not in scope here, but several read the same state dirs.",
+  "Does anything besides index.ts consume drain.flag, and does the dashboard's 'Start pool' path always clearDrain() before spawning (drain.ts:39-48 says both startPool and drain-complete should)?",
+  "Is `maxParallel` meant to override the optimizationMode entirely (optimizer.ts:35-38 says yes) while `maxConcurrent` still feeds warmTargets/perTierMax? Today config.json sets both to 2, so the interaction is untested in production.",
+  "Should MERGE and PROMOTE really be exempt from the slot budget? They cost no model tokens but do cost GitHub API calls and can cascade (a merge re-conflicts every open PR, which is precisely what the throttle exists to damp).",
+  "Is the `default/` state dir (last written 2026-07-08, sim-mode status.json) still produced by any current path, or purely historical?"
+ ]
+}

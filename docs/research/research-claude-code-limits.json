@@ -1,0 +1,494 @@
+{
+ "key": "claude-code-limits",
+ "summary": "There are FOUR ways to read Pro/Max plan usage, and only one is both official and headless-capable.\n\n(1) STATUS LINE (official, interactive-only): the statusLine command's stdin JSON carries `rate_limits.five_hour.{used_percentage,resets_at}`, `rate_limits.seven_day.{...}`, and (v2.1.251+) `rate_limits.spend_limit.{...}`. `used_percentage` is 0-100, `resets_at` is Unix epoch SECONDS. Present only for Claude.ai Pro/Max, only after the first API response, each window independently omitted (not null) when unknown. Status lines do NOT run under `claude -p` — no TUI footer exists — so this path is useless to a headless orchestrator unless it keeps one interactive session alive as a \"usage probe\".\n\n(2) stream-json `rate_limit_event` (official, headless, BUT NO PERCENTAGES): verified in the local v2.1.158 binary's zod schema — `{type:\"rate_limit_event\", rate_limit_info:{status:\"allowed\"|\"allowed_warning\"|\"rejected\", resetsAt?, rateLimitType?:\"five_hour\"|\"seven_day\"|\"seven_day_opus\"|\"seven_day_sonnet\"|\"overage\", utilization?, overageStatus?, overageResetsAt?, overageDisabledReason?, isUsingOverage?, surpassedThreshold?}, uuid, session_id}`. `utilization` is OPTIONAL and is omitted in normal `status:\"allowed\"` operation — it only appears after a warning threshold is crossed. Only ONE representative window is reported, not per-bucket. Two feature requests to fix this (#50518, #78476) were CLOSED AS NOT PLANNED.\n\n(3) SDK experimental usage control request (official, headless, HAS PERCENTAGES — the real answer): `Query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` added in @anthropic-ai/claude-agent-sdk v0.3.169 (parity CC v2.1.169), returning structured session cost, plan rate-limit windows, and local usage-behaviors. v0.3.191 added `model_scoped` array for per-model weekly windows with utilization + reset times. v0.3.261 added `{skipBehaviors:true}` to skip the 7-day local transcript scan when you only want plan rate limits. It rides the control protocol as a `get_usage` control_request (Go SDK: `Client.GetUsageExperimental`, payload field `skip_behaviors`). NOTE: this postdates the locally installed v2.1.158, which is why `get_usage` is absent from that binary.\n\n(4) The undocumented OAuth endpoint `GET https://api.anthropic.com/api/oauth/usage` — this is what `/usage` itself calls (verified in the binary: `fetchUtilization: GET /api/oauth/usage`, timeout 5000ms, `refreshOAuth:true`). Community statusline tools call it directly with the token from `~/.claude/.credentials.json` → `claudeAiOauth.accessToken`. Anthropic's own legal page prohibits third-party developers from routing requests through Pro/Max credentials on behalf of users and from collecting/storing/intermediating Claude.ai credentials — a personal, single-user orchestrator on your own machine is a grey zone, not a green light.\n\nSEPARATELY, the underlying wire truth: Claude Code derives all of this from response headers `anthropic-ratelimit-unified-{5h,7d,overage}-{utilization,reset}` plus `anthropic-ratelimit-unified-{status,reset,fallback,representative-claim,overage-status,overage-reset,overage-disabled-reason,upgrade-paths}`. The per-bucket cache IS populated in headless mode; it is simply not surfaced (that is exactly what issue #50518 documents).\n\nFor PER-RUN usage capture, the `result` event is fully sufficient and official: `total_cost_usd`, `usage`, `modelUsage` (per-model `inputTokens/outputTokens/cacheReadInputTokens/cacheCreationInputTokens/webSearchRequests/costUSD/contextWindow/maxOutputTokens`), `num_turns`, `duration_ms`, `duration_api_ms`, `session_id`, `permission_denials`. Critical gotcha: `usage` EXCLUDES subagents and is main-loop/per-turn only; `total_cost_usd` and `modelUsage` INCLUDE subagents — use modelUsage for accounting. Per-step `output_tokens` on assistant messages is a placeholder; read output tokens from the result.",
+ "findings": [
+  {
+   "claim": "The statusLine stdin JSON contains `rate_limits.five_hour.used_percentage` (0-100), `rate_limits.five_hour.resets_at` (Unix epoch SECONDS), the same two fields under `seven_day`, and under `spend_limit` (v2.1.251+, can exceed 100). The `rate_limits` object appears ONLY for Claude.ai Pro/Max subscribers (or behind a Claude apps gateway with spend limits) and ONLY after the first API response in the session. Each window may be independently absent, and Claude Code DROPS a window once its resets_at passes. Recommended access: `jq -r '.rate_limits.five_hour.used_percentage // empty'`.",
+   "source_url": "https://code.claude.com/docs/en/statusline",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Full statusline JSON schema (verbatim from docs, 'Full JSON schema' accordion): cwd, session_id, session_name, prompt_id, transcript_path, model{id,display_name}, workspace{current_dir,project_dir,added_dirs,git_worktree,repo{host,owner,name}}, version, output_style{name}, cost{total_cost_usd,total_duration_ms,total_api_duration_ms,total_lines_added,total_lines_removed}, context_window{total_input_tokens,total_output_tokens,context_window_size,used_percentage,remaining_percentage,current_usage{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}}, exceeds_200k_tokens, prompt_cache{...}, fast_mode, effort{level}, thinking{enabled}, rate_limits{five_hour{used_percentage,resets_at},seven_day{...},spend_limit{...}}, vim{mode}, agent{name}, pr{number,url,review_state,kind}, worktree{name,path,branch,original_cwd,original_branch}. Example values shown: five_hour used_percentage 23.5 / resets_at 1738425600; seven_day 41.2 / 1738857600.",
+   "source_url": "https://code.claude.com/docs/en/statusline",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Verified in the installed CLI binary: the statusline rate_limits object is built by multiplying the cached per-bucket utilization by 100 — `E={...v.five_hour&&{five_hour:{used_percentage:v.five_hour.utilization*100,resets_at:v.five_hour.resets_at}},...v.seven_day&&{seven_day:{used_percentage:v.seven_day.utilization*100,resets_at:v.seven_day.resets_at}}}` where `v=xD8()` is the per-bucket cache. It is attached only via `...(E.five_hour||E.seven_day)&&{rate_limits:E}` — this conditional spread is WHY unknown windows are omitted rather than null.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbols n0f, xD8, ZkH)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Verified in the installed CLI binary: the per-bucket cache is parsed directly from HTTP response headers — `function Zq7(H){let q={};for(let[$,K]of[[\"five_hour\",\"5h\"],[\"seven_day\",\"7d\"],[\"overage\",\"overage\"]]){let _=H.get(`anthropic-ratelimit-unified-${K}-utilization`),f=H.get(`anthropic-ratelimit-unified-${K}-reset`);if(_!==null&&f!==null)q[$]={utilization:Number(_),resets_at:Number(f)}}return q}`. Note `utilization` here is a FRACTION (0-1), since the statusline multiplies by 100.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbol Zq7)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Full set of rate-limit response headers Claude Code reads (extracted from the binary): anthropic-ratelimit-unified-status, anthropic-ratelimit-unified-reset, anthropic-ratelimit-unified-fallback, anthropic-ratelimit-unified-representative-claim, anthropic-ratelimit-unified-overage-status, anthropic-ratelimit-unified-overage-reset, anthropic-ratelimit-unified-overage-disabled-reason, anthropic-ratelimit-unified-upgrade-paths, plus anthropic-ratelimit-unified-{5h,7d,overage}-utilization and -reset.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbols Vq7, Zq7)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`rate_limit_event` IS a real stream-json message type. Exact zod schema from the binary: `h.object({type:h.literal(\"rate_limit_event\"),rate_limit_info:Xn1(),uuid:Mz(),session_id:h.string()}).describe(\"Rate limit event emitted when rate limit info changes.\")`. And `Xn1 = h.object({status:h.enum([\"allowed\",\"allowed_warning\",\"rejected\"]),resetsAt:h.number().optional(),rateLimitType:h.enum([\"five_hour\",\"seven_day\",\"seven_day_opus\",\"seven_day_sonnet\",\"overage\"]).optional(),utilization:h.number().optional(),overageStatus:h.enum([\"allowed\",\"allowed_warning\",\"rejected\"]).optional(),overageResetsAt:h.number().optional(),overageDisabledReason:h.enum([...13 values...]).optional(),isUsingOverage:h.boolean().optional(),surpassedThreshold:h.number().optional()}).describe(\"Rate limit information for claude.ai subscription users.\")`. Note camelCase field names (resetsAt, rateLimitType) unlike the statusline's snake_case.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbols Ln1, Xn1, Zg4)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "CRITICAL LIMITATION: in normal `status:\"allowed\"` operation the `utilization` field is OMITTED from rate_limit_event, so a headless consumer gets only `{status, resetsAt, rateLimitType}` — status + reset time, no percentage, and only for a single representative window. Anthropic's own per-bucket cache is populated on every API call from the anthropic-ratelimit-unified-* headers but is exposed only through the TUI React callback chain (statusLine), which headless mode never invokes. Requests to always include utilization or add a `rate_limits_snapshot`/buckets field were CLOSED AS NOT PLANNED.",
+   "source_url": "https://github.com/anthropics/claude-code/issues/50518",
+   "confidence": "community-report",
+   "date_of_source": "2026-04-18"
+  },
+  {
+   "claim": "Feature request to expose subscription usage percentages headlessly (either utilization fields in rate_limit_event, or a `claude usage --json` subcommand) was CLOSED AS NOT PLANNED. It documents the actual observed rate_limit_event payload: {\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1784283600,\"rateLimitType\":\"five_hour\",\"overageStatus\":\"allowed\",\"overageResetsAt\":1785542400,\"isUsingOverage\":false}}. It also states /usage calls the authenticated /api/oauth/usage endpoint, which third-party tools cannot safely use with Claude Code's OAuth token.",
+   "source_url": "https://github.com/anthropics/claude-code/issues/78476",
+   "confidence": "community-report",
+   "date_of_source": "2026-07-17"
+  },
+  {
+   "claim": "THE OFFICIAL HEADLESS PATH WITH PERCENTAGES: Agent SDK v0.3.169 added an experimental `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` method on `Query` returning structured session cost, plan rate-limit, and local usage-behaviors data. v0.3.191 added `model_scoped` array to the usage response for per-model weekly limit windows with utilization and reset times (and added `seven_day_overage_included` to SDKRateLimitInfo.rateLimitType). This is SDK-only; the CLI has no equivalent flag.",
+   "source_url": "https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "TS SDK v0.3.261 changed the experimental usage API signature from no-arg to accepting `opts?: { skipBehaviors?: boolean }`; `skipBehaviors: true` skips the scan of local transcripts that fills the response's `behaviors` section (it becomes null), for callers that need only the plan rate limits. The scan otherwise reads every transcript touched in the last seven days — i.e. it is expensive. The underlying control request payload gained `skip_behaviors?: boolean`. The Go SDK exposes it as `Client.GetUsageExperimental` / `Stream.GetUsageExperimental`, a `get_usage` control request returning session cost/usage totals, claude.ai plan rate-limit windows, and local-transcript behavioral attribution.",
+   "source_url": "https://github.com/Flohs/claude-agent-sdk-go/issues/675",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`get_usage` is NOT present in the locally installed Claude Code v2.1.158 binary (grep for the string returns nothing), consistent with the SDK changelog placing it at v0.3.169 / CC v2.1.169. The installed CLI is at C:\\Users\\pegan\\.local\\bin\\claude.exe → C:\\Users\\pegan\\.local\\share\\claude\\versions\\2.1.158. An upgrade is required before the control request will work.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`rate_limit_event` is re-emitted during an exceeded window on repeat 429s, about once per 30 seconds per limit window, so stream consumers can refresh stale rate-limit state. (Agent SDK changelog.)",
+   "source_url": "https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The CLI's own sdkMessageAdapter IGNORES rate_limit_event internally — binary contains `case\"rate_limit_event\":return N(\"[sdkMessageAdapter] Ignoring rate_limit_event message\"),{type:\"ignored\"}`. The Python Agent SDK's message_parser.py historically did NOT handle rate_limit_event and raised MessageParseError, terminating the whole async generator. Third-party stream-json consumers (e.g. GitButler) broke with 'unknown variant rate_limit_event'. ANY orchestrator parsing stream-json MUST tolerate unknown message types.",
+   "source_url": "https://github.com/anthropics/claude-agent-sdk-python/issues/601",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "EXACT result-event schema from the binary. Success: `{type:\"result\",subtype:\"success\",duration_ms:number,duration_api_ms:number,ttft_ms?:number,is_error:boolean,api_error_status?:number|null,num_turns:number,result:string,stop_reason:string|null,total_cost_usd:number,usage:unknown,modelUsage:Record<string,ModelUsage>,permission_denials:PermissionDenial[],structured_output?:unknown,deferred_tool_use?,terminal_reason?,fast_mode_state?,origin?,uuid,session_id}`. Error: same shape with `subtype:\"error_during_execution\"|\"error_max_turns\"|\"error_max_budget_usd\"|\"error_max_structured_output_retries\"` plus `errors:string[]`, and WITHOUT `result`, `ttft_ms`, `api_error_status`, `structured_output`.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbols Gn1, Vn1, Tn1)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "EXACT modelUsage entry schema from the binary: `h.object({inputTokens:h.number(),outputTokens:h.number(),cacheReadInputTokens:h.number(),cacheCreationInputTokens:h.number(),webSearchRequests:h.number(),costUSD:h.number(),contextWindow:h.number(),maxOutputTokens:h.number()})`. Newer versions add `costBasis` ('list'|'managed'|'unknown', CC v2.1.246+), `canonicalModel`, `provider`, and `thinkingTokens` (a subset of outputTokens).",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbol Gk7)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "SUBAGENT ACCOUNTING GOTCHA (official table): `usage` = subagents EXCLUDED, counts only the top-level agent loop; `total_cost_usd` = subagents INCLUDED; `modelUsage`/`model_usage` = subagents INCLUDED, broken down by model. 'the usage field undercounts as soon as nesting occurs'. Also: `usage` is main-loop-only and per-turn while `modelUsage` is cumulative and covers all query-pipeline calls — modelUsage is 'the field for cost accounting'.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/cost-tracking",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Per-step `output_tokens` on assistant messages is a PLACEHOLDER — 'the message's output_tokens is only the count the API had reported at message_start, before the response was generated. One API response can produce several assistant messages, and every one of them carries that same placeholder.' Read output tokens from the result's `usage` or `modelUsage`. Parallel tool calls share the same message ID — deduplicate by `message.message.id` or you double-count input tokens.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/cost-tracking",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`total_cost_usd` and `costUSD` are CLIENT-SIDE ESTIMATES from a price table bundled at build time, not authoritative billing. They include a 1.1x multiplier when a response reports `inference_geo: \"us\"` (data residency), TS SDK v0.3.239+ / Python v0.2.144+. Docs explicitly: 'Do not bill end users or trigger financial decisions from these fields.' On a Pro/Max subscription the dollar figure is not relevant for billing at all — usage is included in the subscription.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/cost-tracking",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "CRASH RECOVERY GOTCHA: an `error_during_execution` result after a session crash may carry ZEROED usage, total_cost_usd and modelUsage. `error_max_budget_usd` results have `usage` that omits the response that crossed the budget while total_cost_usd/modelUsage include it. Recover by using the prior turn's result, or by summing deduplicated assistant-message usage (recovers main-loop input/cache tokens only).",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/cost-tracking",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`/usage` is the official interactive readout: plan usage bars, a breakdown attributing recent usage to skills, subagents, plugins and individual MCP servers, behavior flags (long context, cache misses) when one accounts for >=10% of recent usage, and Loops rows (v2.1.242+). Press `d`/`w` to toggle 24-hour vs 7-day views. The attribution figures 'are approximate and computed from local session history on this machine, so usage from other devices or claude.ai is not included' — but the plan usage BARS come from the server endpoint. When the usage endpoint is rate limited, /usage shows the last bars loaded within the past 60 minutes with a 'Showing last-known usage' note; press `r` to retry.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Verified in the binary: /usage fetches from the OAuth endpoint — `async function FXH(){return X4(\"api_usage_fetch\",async()=>{...N(`fetchUtilization: GET /api/oauth/usage (attempt ${H})`);let $=await U7.get(\"/api/oauth/usage\",{timeout:5000,headers:{\"Content-Type\":\"application/json\"},refreshOAuth:!0});if(!$.ok)throw Error(`Auth error: ...`);return $});...return q.data})}`. The response payload includes an `extra_usage` object with `{is_enabled, monthly_limit, used_credits, currency, utilization}`. It retries on 401 by refreshing OAuth (log line: '401→refresh→retry succeeded').",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbol FXH)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The OAuth credential file on Windows is a plain JSON file at C:\\Users\\<user>\\.claude\\.credentials.json (508 bytes on this machine, mode 0644 — NOT Windows Credential Manager). Verified key structure: {\"claudeAiOauth\":{\"accessToken\",\"refreshToken\",\"expiresAt\",\"refreshTokenExpiresAt\",\"scopes\",\"subscriptionType\",\"rateLimitTier\"}}. On macOS the same data lives in the Keychain under the item 'Claude Code-credentials'. accessToken is an sk-ant-oat01-* token, refreshToken sk-ant-ort01-*.",
+   "source_url": "file:///C:/Users/pegan/.claude/.credentials.json",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Community statusline tools call the endpoint directly as: GET https://api.anthropic.com/api/oauth/usage with headers `Authorization: Bearer {claudeAiOauth.accessToken}` and `anthropic-beta: oauth-2025-04-20` (the beta string `oauth-2025-04-20` is confirmed present in the v2.1.158 binary). Some reports add `User-Agent: claude-code/<version>`, claiming that without it you land in an aggressively rate-limited bucket and get persistent 429s. Response gives 5h and 7d utilization percentages with ISO-8601 reset timestamps (e.g. \"2026-02-08T04:59:59.000000+00:00\") plus a Sonnet-only weekly figure absent from the statusline stdin. Note the FORMAT MISMATCH: statusline resets_at is epoch seconds; this endpoint returns ISO strings.",
+   "source_url": "https://github.com/ohugonnot/claude-code-statusline",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Community statusline tools cache the endpoint response aggressively: ohugonnot/claude-code-statusline uses REFRESH_INTERVAL=300 (5 min) with a shared, file-locked cache at ~/.claude/usage-exact.json so multiple Claude Code windows do not each hit the API. jtbr's guide uses USAGE_CACHE_AGE=180. Both README/guide warn the endpoint 'is not an official API—it could change without notice'.",
+   "source_url": "https://gist.github.com/jtbr/4f99671d1cee06b44106456958caba8b",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OPEN BUG affecting any consumer: individual rate_limits windows are OMITTED rather than null, so a status line cannot distinguish 'window is 0% used' from 'value unknown'. Observed payload: `\"rate_limits\": { \"seven_day\": { \"used_percentage\": 47, \"resets_at\": 1788606000 } }` with five_hour entirely absent. Issue opened 2026-09-04 against CLI v2.1.260, still OPEN, labels area:statusline/bug/platform:windows, no Anthropic response. The issue text also references an existing `get_usage` control-protocol schema that DOES have a `rate_limits_available` boolean — evidence the control request carries availability metadata the statusline lacks.",
+   "source_url": "https://github.com/anthropics/claude-code/issues/92081",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-04"
+  },
+  {
+   "claim": "Claude Code also FIXES stale windows: changelog entry 'Fixed the status line rate_limits fields and /usage still showing a rate-limit window's pre-reset usage percentage after the window reset while the session was idle' — i.e. on older versions the percentages could be stale across a reset boundary while idle. Docs confirm Claude Code drops a window once its resets_at time passes.",
+   "source_url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`rate_limits.spend_limit` (Claude apps gateway spend limits) was added alongside a Spend limit bar in /usage; changelog: 'Added a Spend limit bar to /usage and a rate_limits.spend_limit status line field for developers behind a Claude apps gateway with spend limits'. Requires CC v2.1.251+. Its used_percentage may exceed 100.",
+   "source_url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "NO hook fires specifically on rate limit. The hook event list is: SessionStart, Setup, UserPromptSubmit, UserPromptExpansion, PreToolUse, PermissionRequest, PermissionDenied, PostToolUse, PostToolUseFailure, PostToolBatch, Notification, MessageDisplay, SubagentStart, SubagentStop, TaskCreated, TaskCompleted, Stop, StopFailure, TeammateIdle, InstructionsLoaded, ConfigChange, CwdChanged, DirectoryAdded, FileChanged, WorktreeCreate, WorktreeRemove, PreCompact, PostCompact, PreModelSwitch, PostModelSwitch, Elicitation, ElicitationResult. The closest thing is `StopFailure`, which fires when a turn ends due to an API error and whose MATCHER accepts `rate_limit` (alongside overloaded, authentication_failed, oauth_org_not_allowed, account_on_hold, billing_error, invalid_request, model_not_found, server_error, max_output_tokens, cloud_credential_error, unknown).",
+   "source_url": "https://code.claude.com/docs/en/hooks",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The `Notification` hook matcher includes quota-related types: `quota_auto_resume_fired`, `quota_auto_resume_stale`, `quota_auto_resume_disabled` — these fire around Claude Code's auto-wait-and-resume-after-reset feature (CC v2.1.234+, controlled by the `autoContinueAtUsageLimit` setting and `/rate-limit-options`). These are informational/read-only events but are a usable signal that a limit was hit and when it resumed.",
+   "source_url": "https://code.claude.com/docs/en/hooks",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Rate-limit / usage-limit ERROR TEXT. Message builder from the binary: `function i9H(H,q,$){return`You've hit your ${H}${q}`}` where H is the window label. Label mapping (binary, functions AJq/Z21): rateLimitType 'five_hour' → 'session limit'; 'seven_day' → 'weekly limit'; 'seven_day_opus' → 'Opus limit'; 'seven_day_sonnet' → 'Sonnet limit' (but 'weekly limit' when plan is pro or enterprise). So headless stderr/result strings to match are: \"You've hit your session limit\", \"You've hit your weekly limit\", \"You've hit your Opus limit\", \"You've hit your Sonnet limit\". Other prefixes in the same bucket array X21: \"You've used\", \"You're now using usage credits\", \"You're close to\", \"You're out of usage credits\", \"You're now using your usage allocation\".",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbols i9H, AJq, Z21, X21)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The Agent SDK exports `USAGE_LIMIT_ERROR_PREFIXES` and sibling arrays as @alpha exports specifically so consumers can classify rate-limit messages 'without hand-mirrored lists'. Use these instead of hardcoding the strings above.",
+   "source_url": "https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "RESET-TIME FORMAT function from the binary: `function Hi(H,q=!1,$=!0,K=!1){...let _=new Date(H*1000)...let A=(_.getTime()-f.getTime())/3600000; if(K||A>24){let O={month:\"short\",day:\"numeric\",hour:...,minute:...,hour12:true}; if(_.getFullYear()!==f.getFullYear())O.year=\"numeric\"; return _.toLocaleString(\"en-US\",O).replace(/ ([AP]M)/i,(j,w)=>w.toLowerCase())+(q?` (${X_8()})`:\"\")}...}`. So: input is epoch SECONDS; if the reset is >24h away it renders like 'Feb 8, 4pm' (lowercased am/pm, minutes omitted when :00, year added if different year), otherwise it renders a relative 'resets in <duration>' form. Strings present: ' · resets ', ' · resets in ', 'resets in ${q}'. DO NOT parse the display string — read resets_at.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbol Hi)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Additional user-facing limit strings in the binary: 'usage limit reached', 'usage limit reached — check plan', 'Fast limit reached and temporarily disabled · resets in ', 'Fast mode disabled · usage credit limit reached', 'Claude is overloaded and is temporarily unavailable · resets in '. Changelog notes server rate limits are now distinguished from plan usage limits in error messages.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The `system/api_retry` stream-json event is the official headless signal for a retryable failure: {type:\"system\", subtype:\"api_retry\", attempt, max_retries, retry_delay_ms, error_status (HTTP code or null), no_response?{waited_ms,retry_wait_ms}, error, uuid, session_id}. `error` is one of authentication_failed, oauth_org_not_allowed, account_on_hold, billing_error, rate_limit, overloaded, invalid_request, model_not_found, server_error, max_output_tokens, cloud_credential_error, unknown. IMPORTANT: 529 now reports error:'overloaded' (previously 'rate_limit'); 'rate_limit' is now reserved for 429. Match on error_status===429 for robustness.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Also: 'Fixed the result event's api_error_status reporting null for rate-limit and overloaded errors delivered mid-stream; it now reports 429/529.' So on recent versions the result event's `api_error_status` is a reliable 429 indicator for a run killed by a rate limit.",
+   "source_url": "https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "STATUS LINES DO NOT RUN IN HEADLESS MODE. 'A statusline needs an interactive footer to draw itself into, and a -p/headless run has none. StatusLine settings, however configured, never produce output in scheduled, headless claude -p jobs with no terminal open.' Corroborated by issue #50518: 'The CLI's statusLine command accesses this data, but only runs in the TUI's React tree, not in headless mode.'",
+   "source_url": "https://dispatchseo.com/blog/claude-code-statusline",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OFFICIAL AGENT SDK AUTH POLICY, verbatim from the overview page: 'Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead.' The Agent SDK is governed by Anthropic's Commercial Terms of Service.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/overview",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Mechanically, the Agent SDK spawns the unmodified `claude` CLI as a subprocess, so on your OWN machine with your OWN login it does ride your subscription — Anthropic's support article confirms: 'Claude Agent SDK, `claude -p`, and third-party app usage still draw from your subscription's usage limits' (June 15 update pausing planned changes to SDK metering). The prohibition is on OFFERING that login to other people, not on a single user running the SDK for themselves. Note `--bare` is the exception: 'In bare mode, Claude Code never reads OAuth credentials or the system keychain' — it requires ANTHROPIC_API_KEY or an apiKeyHelper.",
+   "source_url": "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "COMMUNITY MONITOR BEHAVIOR — ccusage: groups usage into 5-hour billing windows derived from local activity timestamps; 'Block Start: Triggered by your first message. Block Duration: Lasts exactly 5 hours from start time.' Block boundaries are computed in UTC. It reports burn Rate (tokens/min) and Projected totals, which are extrapolations, not server-side truth. Commands: `blocks --active`, `--recent`, `--token-limit`, `--session-length`, `--json`, `--offline`. The `--live` flag was REMOVED in v18.0.0; ccusage now recommends its `statusline` command instead (which reads Claude Code's own stdin JSON).",
+   "source_url": "https://ccusage.com/guide/blocks-reports",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "COMMUNITY MONITOR BEHAVIOR — Claude-Code-Usage-Monitor (Maciek-roboblog): uses THREE channels with a precedence order. (1) parses ~/.claude/projects JSONL session blocks; (2) `--statusline` mode captures Claude Code's official `rate_limits` when available; (3) `--api` opt-in enables the 'experimental Anthropic OAuth usage API'. When official statusline data is fresh it WINS; otherwise the snapshot is labeled a 'local estimate'. P90 = 90th-percentile analysis of historical usage to infer the real limit for the 'custom' plan. Documented caveats: multi-session dedup across overlapping 5-hour windows, Team plan limits 'unverified', cross-device gaps (local logs only), timezone edge cases, and `--filter-models anthropic` excluding routed non-Claude models from limit math. Plan presets: Pro ~19k, Max5 ~88k, Max20 ~220k tokens (fixed estimates).",
+   "source_url": "https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/blob/main/README.md",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "THE FUNDAMENTAL ACCURACY CAVEAT of all transcript-parsing monitors: the local JSONL transcripts in ~/.claude/projects only contain what THIS machine's Claude Code did. They do not include claude.ai web/mobile chat usage, Cowork, other devices, or the actual server-side limit value (which Anthropic does not publish and which varies by plan and by model family). Token-count-based limit inference is therefore an estimate; the server-side utilization percentage is the only ground truth.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OTEL is the official, fully-supported per-run usage capture path and works on every provider: metrics `claude_code.token.usage` (attributes: type=input|output|cacheRead|cacheCreation, model, query_source, speed, effort, agent.name, skill.name, plugin.name, marketplace.name, mcp_server.name, mcp_tool.name), `claude_code.cost.usage` (USD), `claude_code.session.count`, `claude_code.lines_of_code.count`, `claude_code.active_time.total`, `claude_code.code_edit_tool.decision`, `claude_code.commit.count`, `claude_code.pull_request.count`. Events: claude_code.api_request (cost_usd, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, duration_ms, request_id, client_request_id, effort, speed), claude_code.api_error (status_code, attempt), claude_code.user_prompt, claude_code.assistant_response, claude_code.tool_result, claude_code.tool_decision, claude_code.api_refusal. Correlate with `prompt.id` (also exposed as the statusline's `prompt_id`), `message.uuid`, `client_request_id`. NO rate-limit or subscription-window metric is exported.",
+   "source_url": "https://code.claude.com/docs/en/monitoring-usage",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "SESSION FLAGS, exact semantics. `--session-id <uuid>`: use a specific session ID (must be a valid UUID). `--resume, -r <id|name|path>`: resume by ID or name, interactive picker, or the ABSOLUTE PATH to a session's .jsonl transcript; since v2.1.223 it searches ALL projects on the machine, before that only the current project dir + its git worktrees. `--fork-session`: when resuming, create a NEW session ID instead of reusing the original (use with --resume or --continue). `--continue, -c`: load the most recent conversation in the current directory; it SKIPS sessions created with `claude -p`/the Agent SDK and sessions whose first prompt was `/loop` — BUT `claude -p --continue` DOES include -p, SDK and /loop sessions. v2.1.257+ --continue also opens a finished background session (not a running one).",
+   "source_url": "https://code.claude.com/docs/en/cli-reference",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "TOOL/MODEL/PROMPT FLAGS, exact semantics. `--allowedTools`/`--allowed-tools`: tools that execute WITHOUT a permission prompt, using permission rule syntax (`Bash(git diff *)` — the space before * matters). `--tools`: RESTRICTS which tools are AVAILABLE at all; accepts `default` (built-ins only), tool names, or patterns; MCP tools need `mcp__` prefix or `mcp__*`. `--disallowedTools`: deny rules; a bare name removes the tool from context, a scoped rule denies only matching calls. `--model`: alias (sonnet/opus/haiku/fable) or full name; overrides the `model` setting and ANTHROPIC_MODEL. `--effort`: low|medium|high|xhigh|max|ultracode (ultracode = xhigh + ultracode on, v2.1.203+). `--system-prompt` REPLACES the default prompt; `--system-prompt-file` loads it from a file; `--append-system-prompt` APPENDS; `--append-system-prompt-file` also exists. `--max-turns`: print mode only, exits with an error at the limit, no limit by default. `--permission-mode`: default|acceptEdits|plan|auto|dontAsk|bypassPermissions|manual (manual is an alias for default, v2.1.200+). `--max-budget-usd`: print mode only; subagent spend counts; exceeding it fails new subagents with `Budget limit reached` and produces an `error_max_budget_usd` result.",
+   "source_url": "https://code.claude.com/docs/en/cli-reference",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "For -p runs the BUILT-IN STARTING PERMISSION MODE IS MANUAL ON EVERY PLAN — you must pass --permission-mode explicitly. `--permission-prompts none` (v2.1.259+) makes unattended runs deny anything that would prompt and tells Claude not to retry; it also removes AskUserQuestion. With --output-format stream-json, denials appear as `permission_denied` system messages and the result lists them in `permission_denials`.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`--bare` (recommended for scripted/SDK calls, will become the default for -p) skips auto-discovery of hooks, skills, custom commands, subagents, plugins, MCP servers, auto memory and CLAUDE.md — AND never reads OAuth credentials or the system keychain, so it CANNOT use the subscription. For an orchestrator that must ride a Pro/Max login, DO NOT use --bare.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "system/init event fields and ordering: it is the FIRST event unless startup events precede it (plugin_install events when CLAUDE_CODE_SYNC_PLUGIN_INSTALL is set; hook_started/hook_progress/hook_response while a SessionStart or Setup hook runs). It reports model, tools, mcp_servers[{name,status}], mcp_server_errors[{name,type,message}] (v2.1.219+), plugins[{name,path}], plugin_errors[{plugin,type,message}], and an optional `capabilities` string array (v2.1.205+, e.g. interrupt_receipt_v1) for feature-detection instead of version comparison.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Subagent messages in stream-json carry `parent_tool_use_id` = the ID of the spawning tool call (null for main conversation). By default only the subagent's tool_use/tool_result blocks are forwarded; `--forward-subagent-text` or CLAUDE_CODE_FORWARD_SUBAGENT_TEXT (v2.1.211+) also forwards text and thinking blocks. Nested subagents forward too since v2.1.219.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "`claude -p` exits 0 on success, non-zero on failure, and 143 on SIGTERM (leaving the in-progress turn unfinished with no result recorded). SIGINT ends the turn instead. On SIGTERM only SessionEnd hooks run. Resuming continues the unfinished turn. Piped stdin is capped at 10MB.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Claude Code v2.1.234+ can WAIT OUT a usage limit and automatically continue the interrupted task after the reset; this is controlled by the `autoContinueAtUsageLimit` setting (settable via managed settings) and selectable from `/rate-limit-options`. The corresponding Notification hook matchers are quota_auto_resume_fired / _stale / _disabled. An orchestrator should be aware this can silently extend a run's wall-clock duration.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Binary telemetry hook confirming a client-side state machine you can mirror: `function bD8(H){let q=TL.status;TL=H,OwH.forEach((K)=>K(H));...d(\"tengu_claudeai_limits_status_changed\",{status:H.status,previousStatus:q,rateLimitType:H.rateLimitType,isUsingOverage:H.isUsingOverage,...})}` — the subscriber set OwH is exactly what enqueues `rate_limit_event` into the SDK stream (`let I=(WH)=>{let vH=Zg4(WH);if(vH)y.enqueue({type:\"rate_limit_event\",rate_limit_info:vH,uuid:nP.randomUUID(),session_id:E8()})};OwH.add(I)`). So rate_limit_event fires on STATUS CHANGE, not on every response — you cannot poll it.",
+   "source_url": "file:///C:/Users/pegan/.local/share/claude/versions/2.1.158 (symbols bD8, OwH, Zg4)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Anthropic considers 5-hour + weekly windows to be per-seat and shared across Claude chat, Claude Code and Cowork on Team/Enterprise: 'each member's Claude Code usage draws from a per-seat allowance that resets on a rolling five-hour window and a weekly window. The allowance is shared with Claude chat and Cowork'. This is why local-transcript inference systematically UNDERCOUNTS.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Background token usage exists even when idle: 'Conversation summarization: Background jobs that summarize previous conversations for the claude --resume feature' and 'Some commands like /usage may generate requests to check status' — typically under $0.04 per session. Polling /usage itself costs a little usage.",
+   "source_url": "https://code.claude.com/docs/en/costs",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  }
+ ],
+ "exact_commands_or_apis": [
+  "# ---------- PER-RUN USAGE CAPTURE (official, reliable) ----------",
+  "claude -p \"<prompt>\" --output-format stream-json --verbose",
+  "claude -p \"<prompt>\" --output-format stream-json --verbose --include-partial-messages",
+  "claude -p \"<prompt>\" --output-format json   # single JSON envelope; simplest for per-run accounting",
+  "claude -p \"Summarize this project\" --output-format json | jq -r '.result'",
+  "claude -p \"...\" --output-format json | jq '{cost:.total_cost_usd, turns:.num_turns, sid:.session_id, ms:.duration_ms, api_ms:.duration_api_ms, models:.modelUsage}'",
+  "# result event (success) exact fields:",
+  "{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":N,\"duration_api_ms\":N,\"ttft_ms\":N?,\"is_error\":bool,\"api_error_status\":N|null?,\"num_turns\":N,\"result\":\"...\",\"stop_reason\":\"...\"|null,\"total_cost_usd\":N,\"usage\":{...},\"modelUsage\":{\"<model>\":{...}},\"permission_denials\":[...],\"structured_output\":?,\"deferred_tool_use\":?,\"terminal_reason\":?,\"fast_mode_state\":?,\"origin\":?,\"uuid\":\"...\",\"session_id\":\"...\"}",
+  "# result event (error) exact subtypes:",
+  "\"error_during_execution\" | \"error_max_turns\" | \"error_max_budget_usd\" | \"error_max_structured_output_retries\"   // plus \"errors\":[string], no \"result\" field",
+  "# modelUsage entry exact fields:",
+  "{\"inputTokens\":N,\"outputTokens\":N,\"cacheReadInputTokens\":N,\"cacheCreationInputTokens\":N,\"webSearchRequests\":N,\"costUSD\":N,\"contextWindow\":N,\"maxOutputTokens\":N}  // + costBasis/canonicalModel/provider/thinkingTokens on newer versions",
+  "# per-message usage (Anthropic API shape) on assistant events:",
+  "message.message.usage = {input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens}   // dedupe by message.message.id; output_tokens is a PLACEHOLDER",
+  "",
+  "# ---------- RATE LIMIT: stream-json event (headless, NO percentage) ----------",
+  "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\"|\"allowed_warning\"|\"rejected\",\"resetsAt\":1784283600,\"rateLimitType\":\"five_hour\"|\"seven_day\"|\"seven_day_opus\"|\"seven_day_sonnet\"|\"overage\",\"utilization\":N?,\"overageStatus\":\"...\"?,\"overageResetsAt\":N?,\"overageDisabledReason\":\"...\"?,\"isUsingOverage\":bool?,\"surpassedThreshold\":N?},\"uuid\":\"...\",\"session_id\":\"...\"}",
+  "claude -p \"hi\" --output-format stream-json --verbose | jq -c 'select(.type==\"rate_limit_event\") | .rate_limit_info'",
+  "",
+  "# ---------- RATE LIMIT: statusline stdin (percentages, INTERACTIVE ONLY) ----------",
+  "jq -r '.rate_limits.five_hour.used_percentage // empty'",
+  "jq -r '.rate_limits.five_hour.resets_at // empty'    # Unix EPOCH SECONDS",
+  "jq -r '.rate_limits.seven_day.used_percentage // empty'",
+  "jq -r '.rate_limits.spend_limit.used_percentage // empty'   # v2.1.251+, may exceed 100",
+  "echo '{\"model\":{\"display_name\":\"Opus\"},\"workspace\":{\"current_dir\":\"/home/user/project\"},\"context_window\":{\"used_percentage\":25},\"session_id\":\"test-session-abc\"}' | ./statusline.sh   # official mock-input test",
+  "# settings.json shape:",
+  "{\"statusLine\":{\"type\":\"command\",\"command\":\"/path/to/script.sh\",\"padding\":0,\"refreshInterval\":30}}",
+  "",
+  "# ---------- RATE LIMIT: SDK experimental control request (headless + percentages) ----------",
+  "npm i @anthropic-ai/claude-agent-sdk   # need >= v0.3.169; >= v0.3.261 for skipBehaviors; >= v0.3.191 for model_scoped",
+  "const q = query({ prompt, options }); const u = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });",
+  "// Go SDK equivalent: client.GetUsageExperimental(ctx)  /  stream.GetUsageExperimental(ctx)",
+  "// wire: control_request subtype \"get_usage\", request payload field \"skip_behaviors\": true",
+  "// response carries: session cost/usage totals, claude.ai plan rate-limit windows, model_scoped[] per-model weekly windows (utilization + reset), behaviors (null when skipped), rate_limits_available",
+  "// REQUIRES Claude Code CLI >= v2.1.169 on PATH (local install is 2.1.158 -> upgrade needed)",
+  "",
+  "# ---------- RATE LIMIT: undocumented OAuth endpoint (what /usage itself calls) ----------",
+  "GET https://api.anthropic.com/api/oauth/usage",
+  "Authorization: Bearer <claudeAiOauth.accessToken>",
+  "anthropic-beta: oauth-2025-04-20",
+  "Content-Type: application/json",
+  "User-Agent: claude-code/<version>        # community reports omitting this lands you in an aggressively rate-limited 429 bucket",
+  "# CLI internals: timeout 5000ms, refreshOAuth:true, auto 401->refresh->retry; response includes extra_usage{is_enabled,monthly_limit,used_credits,currency,utilization}",
+  "# response resets_at are ISO-8601 strings (e.g. \"2026-02-08T04:59:59.000000+00:00\"), NOT epoch seconds like the statusline",
+  "",
+  "# ---------- CREDENTIAL LOCATIONS ----------",
+  "C:\\\\Users\\\\pegan\\\\.claude\\\\.credentials.json          # Windows: PLAIN JSON FILE, mode 0644 (NOT Credential Manager)",
+  "~/.claude/.credentials.json                            # Linux",
+  "security find-generic-password -s 'Claude Code-credentials' -w   # macOS Keychain item name",
+  "# shape: {\"claudeAiOauth\":{\"accessToken\":\"sk-ant-oat01-...\",\"refreshToken\":\"sk-ant-ort01-...\",\"expiresAt\":N,\"refreshTokenExpiresAt\":N,\"scopes\":[...],\"subscriptionType\":\"max\",\"rateLimitTier\":\"...\"}}",
+  "",
+  "# ---------- FILE PATHS ON THIS MACHINE ----------",
+  "C:\\\\Users\\\\pegan\\\\.local\\\\bin\\\\claude.exe                                  # launcher",
+  "C:\\\\Users\\\\pegan\\\\.local\\\\share\\\\claude\\\\versions\\\\2.1.158                 # active single-file binary (236MB)",
+  "C:\\\\Users\\\\pegan\\\\.local\\\\share\\\\claude\\\\versions\\\\2.1.143                 # previous version",
+  "C:\\\\Users\\\\pegan\\\\.claude\\\\projects\\\\<slugified-cwd>\\\\<session-uuid>.jsonl  # transcripts all monitors parse",
+  "C:\\\\Users\\\\pegan\\\\.claude\\\\usage-data\\\\report.html                         # /insights output",
+  "~/.claude/usage-exact.json                                                  # ohugonnot statusline shared OAuth-usage cache",
+  "",
+  "# ---------- SESSION FLAGS ----------",
+  "claude -p \"...\" --session-id <uuid>",
+  "claude -p \"...\" --resume <session-id | session-name | /abs/path/to/transcript.jsonl>",
+  "claude -p \"...\" --resume <id> --fork-session        # new session ID, original untouched",
+  "claude -p \"...\" --continue                          # -p --continue DOES include -p/SDK//loop sessions (bare --continue does not)",
+  "session_id=$(claude -p \"Start a review\" --output-format json | jq -r '.session_id')",
+  "",
+  "# ---------- TOOLS / MODEL / PROMPT / LIMITS ----------",
+  "--allowedTools \"Bash(git diff *),Read,Edit\"    # auto-approve; note the SPACE before *",
+  "--tools \"default,mcp__*\"                       # restrict what EXISTS (stronger than --disallowedTools)",
+  "--disallowedTools \"Edit\" | \"mcp__*\" | \"Bash(rm *)\"",
+  "--model sonnet|opus|haiku|fable|<full-id>",
+  "--effort low|medium|high|xhigh|max|ultracode",
+  "--system-prompt <text> | --system-prompt-file <f> | --append-system-prompt <text> | --append-system-prompt-file <f>",
+  "--max-turns <n>                                # print mode only; -> result subtype error_max_turns",
+  "--max-budget-usd <n>                           # print mode only; -> result subtype error_max_budget_usd; 'Budget limit reached'",
+  "--permission-mode default|manual|acceptEdits|plan|auto|dontAsk|bypassPermissions",
+  "--permission-prompts none                      # v2.1.259+, unattended runs",
+  "--input-format text|stream-json",
+  "--output-format text|json|stream-json",
+  "--json-schema '{...}'                          # result.structured_output",
+  "--forward-subagent-text                        # v2.1.211+, also CLAUDE_CODE_FORWARD_SUBAGENT_TEXT",
+  "--name <display-name> / -n",
+  "--bare                                         # WARNING: never reads OAuth creds/keychain -> cannot use subscription",
+  "",
+  "# ---------- OTEL (official per-run capture, works headless) ----------",
+  "export CLAUDE_CODE_ENABLE_TELEMETRY=1",
+  "export OTEL_METRICS_EXPORTER=console   # or otlp | prometheus | none",
+  "export OTEL_LOGS_EXPORTER=console      # or otlp | none",
+  "export OTEL_METRIC_EXPORT_INTERVAL=10000",
+  "export OTEL_LOGS_EXPORT_INTERVAL=5000",
+  "export OTEL_EXPORTER_OTLP_PROTOCOL=grpc|http/json|http/protobuf",
+  "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317",
+  "# metrics: claude_code.token.usage{type=input|output|cacheRead|cacheCreation,model,...}, claude_code.cost.usage, claude_code.session.count, claude_code.active_time.total",
+  "# events: claude_code.api_request{input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,cost_usd,cost_usd_micros,duration_ms,request_id,client_request_id,effort,speed}",
+  "# correlate via prompt.id (== statusline prompt_id), message.uuid, client_request_id",
+  "",
+  "# ---------- HOOKS ----------",
+  "StopFailure  matcher: rate_limit | overloaded | authentication_failed | oauth_org_not_allowed | account_on_hold | billing_error | invalid_request | model_not_found | server_error | max_output_tokens | cloud_credential_error | unknown",
+  "Notification matcher: quota_auto_resume_fired | quota_auto_resume_stale | quota_auto_resume_disabled | permission_prompt | idle_prompt | agent_completed | ...",
+  "SessionEnd   matcher: clear | resume | logout | prompt_input_exit | other",
+  "# NO RateLimit/UsageLimit hook exists.",
+  "",
+  "# ---------- ERROR TEXT TO MATCH (headless) ----------",
+  "\"You've hit your session limit\"      # rateLimitType five_hour",
+  "\"You've hit your weekly limit\"       # rateLimitType seven_day (also seven_day_sonnet on pro/enterprise)",
+  "\"You've hit your Opus limit\"         # seven_day_opus",
+  "\"You've hit your Sonnet limit\"       # seven_day_sonnet",
+  "\"usage limit reached\" / \"usage limit reached — check plan\"",
+  "\"Fast limit reached and temporarily disabled · resets in <dur>\"",
+  "\"Budget limit reached\"               # --max-budget-usd",
+  "# prefer the SDK @alpha export USAGE_LIMIT_ERROR_PREFIXES over hardcoding these",
+  "# reset rendering: >24h away -> 'Feb 8, 4pm' (en-US, lowercased am/pm, minutes dropped at :00, year appended if different year); <=24h -> 'resets in <duration>'. Parse resets_at, never the string.",
+  "",
+  "# ---------- COMMUNITY TOOLS ----------",
+  "npx ccusage@latest blocks --active --json",
+  "npx ccusage@latest blocks --recent --token-limit <n> --session-length <h> --offline",
+  "npx ccusage@latest statusline        # --live was REMOVED in v18.0.0",
+  "claude-monitor --plan pro|max5|max20|team|custom --statusline --api --filter-models anthropic"
+ ],
+ "policy_notes": [
+  "VERBATIM, Claude Code legal page, 'Authentication and credential use': 'OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications.'",
+  "VERBATIM, same page: 'Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication through Claude Console or a supported cloud provider. Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not collect, store, or intermediate Claude.ai credentials or session tokens — sign-in to a Claude account must complete through Anthropic's own flow.'",
+  "VERBATIM, same page: 'Anthropic reserves the right to take measures to enforce these restrictions and may do so without prior notice.'",
+  "VERBATIM, Agent SDK overview: 'Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead.'",
+  "VERBATIM, legal page acceptable use: 'Claude Code usage is subject to the Anthropic Usage Policy. Advertised usage limits for Pro and Max plans assume ORDINARY, INDIVIDUAL usage of Claude Code and the Agent SDK.' — An orchestrator that fans out many concurrent headless runs to maximize a single subscription's throughput is the exact behavior this sentence is aimed at. This is the single most relevant policy line for the stated use case.",
+  "VERBATIM, legal page: 'The Claude Code binary must not be modified. Claude Code must be installed and run as published by Anthropic, and customers may not remove, disable, or restrict any authentication method built into it.' — Spawning the unmodified CLI as a subprocess is fine; patching it is not.",
+  "VERBATIM, legal page carve-out: 'Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription.' — This is the clause that makes a PERSONAL orchestrator (you, your machine, your login, driving the stock `claude` binary) defensible. It does NOT extend to shipping that orchestrator to other people with your credentials, or to accepting other people's credentials.",
+  "Anthropic support confirms subscription metering of headless use: 'Claude Agent SDK, `claude -p`, and third-party app usage still draw from your subscription's usage limits' (June 15 update pausing a planned change to SDK credit metering). So headless runs DO consume the same 5h/weekly windows shown in /usage.",
+  "Team/Enterprise credit note: 'Credits belong to individual accounts. They can't be shared or pooled across teammates.'",
+  "Calling GET /api/oauth/usage with the token from ~/.claude/.credentials.json is NOT documented and NOT sanctioned. It is not obviously prohibited for a single user reading their OWN usage on their OWN machine (you are not offering login to others, not intermediating anyone else's credentials, and not modifying the binary) — but it IS an undocumented endpoint that Anthropic can change or start blocking without notice, and issue #78476 explicitly characterizes it as 'something third-party tools cannot safely use with Claude Code's OAuth token'. Treat it as best-effort, never as a hard dependency, and never ship it to other users.",
+  "Commercial ToS prohibits reverse engineering/duplicating the Services. Reading strings out of the locally installed binary to understand a JSON schema is a grey area; redistributing extracted code or reimplementing the client is not defensible. Prefer the documented statusline schema + the SDK's experimental method as your citable sources.",
+  "Practical enforcement risk: rapid polling of /api/oauth/usage without a proper User-Agent reportedly drops you into an aggressive 429 bucket. Even the official /usage path is rate-limited server-side — Claude Code's own fallback is to show cached bars from within the last 60 minutes. Poll at >= 5 minutes and cache in one shared file across all orchestrator workers, exactly as the community statuslines do.",
+  "Claude Code itself spends a small amount of plan usage on background work and on /usage status checks (docs: 'typically under $0.04 per session'), so a usage monitor that polls aggressively is itself consuming the thing it measures."
+ ],
+ "recommendations": [
+  "PRIMARY PLAN — upgrade to Claude Code >= v2.1.169 (ideally >= v2.1.261) and use the Agent SDK's `Query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })`. This is the ONLY official, headless, percentage-bearing path, it rides the subscription login, and `skipBehaviors:true` avoids the expensive 7-day transcript scan. Guard it behind a feature flag and a try/catch: the name literally says do not rely on it, and the shape can change between SDK minors. The local install (2.1.158) predates it — confirmed absent from the binary.",
+  "SECONDARY / ZERO-EXTRA-CALL PLAN — run ONE long-lived interactive `claude` session as a dedicated 'usage probe' with a statusLine script whose only job is to atomically write its stdin JSON to a shared file (e.g. %LOCALAPPDATA%\\\\orchestrator\\\\rate_limits.json). Every headless worker then reads that file. This uses the fully documented `rate_limits.five_hour/.seven_day` fields, costs zero extra API calls, and is the same trick Claude-Code-Usage-Monitor's `--statusline` mode uses. Set `statusLine.refreshInterval` (>=1s) so the file keeps updating while the probe is idle. Caveat: the probe session must have made at least one API response, and the data only refreshes when that session gets responses — so nudge it periodically or accept staleness.",
+  "TERTIARY / BEST-EFFORT — GET https://api.anthropic.com/api/oauth/usage with Authorization: Bearer from ~/.claude/.credentials.json claudeAiOauth.accessToken, anthropic-beta: oauth-2025-04-20, and a claude-code/<version> User-Agent. Cache to ONE shared, file-locked JSON with a >=300s TTL across all workers. Treat 401 as 'token rotated, re-read the file' (Claude Code refreshes it for you — never refresh it yourself, and never write to .credentials.json). Treat 429 as 'back off and serve stale'. Degrade gracefully to the statusline file. Do not make this the only source of truth and do not ship it to other users.",
+  "DO NOT build the display on `rate_limit_event`. It is headless-available but carries no `utilization` in normal operation, reports only one representative window, and fires only on status CHANGE (verified: the emitter is a subscriber on the status-change setter). It is useful for exactly two things: detecting `status:\"rejected\"` and reading `resetsAt` to schedule a resume. It also re-emits about once per 30s per window during an exceeded window.",
+  "For PER-RUN capture, parse the final `result` event and store `modelUsage`, NOT `usage`. `usage` excludes subagents and covers only the main loop / current turn; `total_cost_usd` and `modelUsage` include subagents. If your orchestrator spawns subagents at all, `usage` will silently undercount.",
+  "Never trust per-assistant-message `output_tokens` — it is a placeholder copied from message_start. Dedupe assistant messages by `message.message.id` (parallel tool calls share an ID) for input/cache tokens, and take output tokens only from the result. Filter subagent traffic with `parent_tool_use_id !== null`.",
+  "Make the stream-json parser tolerant of UNKNOWN message types (log-and-skip, never throw). rate_limit_event has already broken the Python SDK and GitButler. Also feature-detect with `system/init`'s `capabilities` array (v2.1.205+) rather than comparing version strings.",
+  "Detect rate-limit termination in headless runs by, in order of robustness: (1) result `api_error_status === 429`; (2) `system/api_retry` with `error_status === 429` (match 429 numerically — 529 moved from error:'rate_limit' to error:'overloaded'); (3) `rate_limit_event` with `status:\"rejected\"` plus `resetsAt`; (4) LAST resort, string-match \"You've hit your session limit\"/\"weekly limit\"/\"Opus limit\"/\"Sonnet limit\", preferably via the SDK's @alpha USAGE_LIMIT_ERROR_PREFIXES export rather than hardcoded literals.",
+  "Schedule resumption from `resetsAt` (epoch seconds), never from the rendered string — the renderer switches between an absolute 'Feb 8, 4pm' form (>24h out) and a relative 'resets in <dur>' form, drops minutes at :00, and lowercases am/pm.",
+  "Handle the omitted-vs-null bug (#92081) explicitly: treat a MISSING `rate_limits.five_hour` as UNKNOWN and render '?', not 0%. Do not let a missing window read as 'plenty of headroom' — that is the exact failure mode that will make your orchestrator fan out right into a wall. Also remember Claude Code DELETES a window from the object once its resets_at passes.",
+  "Unit mismatch checklist for your ingest layer: statusline `used_percentage` is 0-100 and `resets_at` is epoch SECONDS; the internal header `utilization` is a 0-1 FRACTION; the /api/oauth/usage `resets_at` is an ISO-8601 STRING; `spend_limit.used_percentage` can exceed 100. Normalize once at the boundary.",
+  "Add OTEL as the belt-and-braces per-run ledger: CLAUDE_CODE_ENABLE_TELEMETRY=1 with OTEL_METRICS_EXPORTER/OTEL_LOGS_EXPORTER=console (or a local otlp collector). It works headless, on every provider, survives crashed runs that zero out the result event, and gives you claude_code.api_request events with exact token and cost fields correlated by prompt.id / client_request_id. It has no rate-limit metric, so it complements rather than replaces the usage read.",
+  "Do NOT use `--bare` in the orchestrator if it must ride the Pro/Max subscription — bare mode never reads OAuth credentials or the keychain and requires ANTHROPIC_API_KEY. This is the single easiest way to accidentally start billing the API instead of the plan (or to just fail auth).",
+  "Set `--permission-mode` explicitly on every headless run: -p starts in Manual on every plan. Pair with `--permission-prompts none` (v2.1.259+) for unattended work, and read `result.permission_denials` to see what got blocked.",
+  "For orchestrating many runs: use `--session-id <uuid>` you generate yourself so you own the key from the start, and use `--resume <id> --fork-session` for speculative branches so the parent transcript stays clean. Note `claude -p --continue` (unlike bare `--continue`) will pick up prior -p/SDK sessions — be deliberate about that.",
+  "Budget-cap every run with `--max-budget-usd` and `--max-turns`; both produce distinguishable result subtypes (error_max_budget_usd, error_max_turns) you can branch on. Remember subagent spend counts toward the budget cap.",
+  "Be aware Claude Code v2.1.234+ may AUTO-WAIT for a usage-limit reset and silently continue (`autoContinueAtUsageLimit`; Notification matchers quota_auto_resume_fired/_stale/_disabled). For an orchestrator you almost certainly want this OFF so the run fails fast and YOU decide the scheduling — otherwise a worker can block for hours.",
+  "If you want the per-model weekly windows (Opus vs Sonnet), only two sources have them: the SDK experimental usage response's `model_scoped` array (v0.3.191+) and /api/oauth/usage. The statusline stdin does NOT carry them.",
+  "Do not reimplement ccusage-style token-threshold inference as your primary gauge. It cannot see claude.ai/Cowork/other-device usage, it does not know the real server-side limit (P90 inference is a guess), and Team limits are explicitly 'unverified'. Use it only as an offline historical report or as a last-resort fallback clearly labeled 'estimate'."
+ ],
+ "unknowns": [
+  "The EXACT JSON response schema of GET /api/oauth/usage is not officially documented and I could not retrieve a verbatim sample. Community sources agree it contains five_hour / seven_day (and a Sonnet-only weekly) objects with `utilization` and ISO-8601 `resets_at`, plus `extra_usage{is_enabled,monthly_limit,used_credits,currency,utilization}` (that last one IS confirmed from the binary). VERIFY LOCALLY: run an interactive `claude` with `--debug-file ./cc-debug.txt`, open `/usage`, then grep the debug file for 'fetchUtilization' — the CLI logs 'fetchUtilization: GET /api/oauth/usage (attempt N)'. Or set OTEL_LOG_RAW_API_BODIES=file:<dir> and inspect. Do this rather than calling the endpoint blind.",
+  "The EXACT response schema of the `get_usage` control request (SDKControlGetUsageResponse) — field names for the rate-limit windows, whether they are snake_case like the statusline or camelCase like rate_limit_info, and the shape of `behaviors` and `model_scoped`. The docs site truncated before the Types section on every fetch and the SDK repo does not publish src/. VERIFY LOCALLY: `npm i @anthropic-ai/claude-agent-sdk` then grep node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts for 'GetUsage', 'model_scoped', 'rate_limits_available', 'SDKRateLimitInfo'. That file is the ground truth and it is on disk.",
+  "Whether the `get_usage` control request can be driven WITHOUT the SDK — i.e. by writing {\"type\":\"control_request\",\"request_id\":\"...\",\"request\":{\"subtype\":\"get_usage\",\"skip_behaviors\":true}} to `claude -p --input-format stream-json --output-format stream-json`. The published Go SDK protocol packages I found only enumerate initialize/can_use_tool/hook_callback/interrupt/set_permission_mode/set_model, so get_usage may be newer than those packages. VERIFY LOCALLY after upgrading: send that line and see whether a control_response comes back.",
+  "Whether `rate_limits.five_hour` percentages are also exposed to the VS Code extension or Remote Control in a machine-readable place on disk (there are hints of a usage cache — /usage falls back to 'the last usage bars it loaded on this machine within the past 60 minutes'). If that cache is a plain JSON file under ~/.claude, reading it would be a zero-network, zero-policy-risk source. VERIFY LOCALLY: open /usage in an interactive session, then look for newly-modified files under C:\\\\Users\\\\pegan\\\\.claude (e.g. `Get-ChildItem -Recurse C:\\\\Users\\\\pegan\\\\.claude | Where LastWriteTime -gt (Get-Date).AddMinutes(-2)`).",
+  "Whether a statusLine command is invoked at all in any non-TUI surface (Remote Control, `claude agents`, background sessions). My grep of the binary for statusLine-near-print-mode was inconclusive, and the only clear statements are community ones plus issue #50518's 'only runs in the TUI's React tree'. VERIFY LOCALLY: point statusLine at a script that appends a timestamp to a file, then run `claude -p 'hi'` and check whether the file grew.",
+  "Exactly which Claude Code version first added `rate_limits` to the statusline stdin. Docs only version-gate `spend_limit` and `prompt_cache` at v2.1.251+; one community source claims v2.1.80 already had five_hour/seven_day. The locally installed v2.1.158 clearly has it (the builder code is present), so anything >= 2.1.158 is safe.",
+  "Whether the `utilization` field in rate_limit_event, when it DOES appear (after surpassedThreshold is crossed), is a 0-1 fraction or a 0-100 percentage. The header value is a fraction and the statusline multiplies by 100, so it is most likely a fraction — but rate_limit_info is built by a different function (Vq7/y21) than the bucket cache (Zq7), so do not assume. VERIFY LOCALLY: capture a rate_limit_event when near a limit, or read the .d.ts JSDoc.",
+  "Whether Anthropic has ever actually enforced against personal read-only polling of /api/oauth/usage. No enforcement reports surfaced; the endpoint has been used by multiple popular statusline tools for months. Absence of evidence is not permission — the legal page reserves the right to act without notice.",
+  "The precise semantics of `anthropic-ratelimit-unified-representative-claim` and `-upgrade-paths` headers, and of `surpassedThreshold` in rate_limit_info. These likely determine WHICH single window rate_limit_event reports, which matters if you try to infer per-bucket state from a sequence of events. Only partially reverse-engineered.",
+  "Whether the 'usage probe' pattern (a long-lived interactive session whose statusline writes rate_limits to disk) keeps refreshing while fully idle. Docs say rate_limits updates 'after the first API response' and that `refreshInterval` re-runs the command, but a re-run may simply re-emit the SAME cached rate_limits rather than fetching fresher data. VERIFY LOCALLY by watching the written file's five_hour.used_percentage while a separate headless worker burns usage — if the probe's number does not move without the probe itself making a request, the pattern needs a periodic nudge.",
+  "Whether `/usage` or the plan-usage bars are reachable at all from `-p` mode on current versions. Docs say built-in commands that only run in the terminal interface are unavailable in -p, and #40793 confirms /usage is TUI-only and does not pipe; but /model, /effort, /fast, /color, /rename and /mcp DO work in -p (v2.1.205+). VERIFY LOCALLY: `claude -p '/usage'` and inspect the output — cheap, one turn.",
+  "The GitHub API rate limit was exhausted mid-research (5,000/hr shared), so I could not diff the full anthropics/claude-code CHANGELOG for the specific entries introducing rate_limit_event, the statusline rate_limits object, or get_usage. Re-run `gh api repos/anthropics/claude-code/contents/CHANGELOG.md --jq .content | base64 -d | grep -n ...` after the limit resets."
+ ]
+}

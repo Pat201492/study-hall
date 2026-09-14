@@ -1,0 +1,248 @@
+{
+ "key": "issue-pipeline",
+ "summary": "Study Room treats GitHub as the queue: `fetchIssues` → `classify()` → a board action per issue. Whether an issue is *buildable* is decided by three independent, pure, zero-token text checks that run before any student is spawned — `issueAudit.ts` (is it actionable / oversized), `buildability.ts` (can a worktree-bound CLI student finish it at all), and `triage.ts`/`difficultyRubric.ts` (is it one PR's worth, and which model tier). `docs/ISSUE-RUBRIC.md` is the human/agent-facing sheet those checkers enforce, but it is a *doc file that no code imports* — only the smaller `DIFFICULTY_RUBRIC` string constant (difficultyRubric.ts:35-76) is ever injected into a prompt, and only into `EDITOR_ROLE` (roles.ts:302). Issues are created today by four paths: a human typing into GitHub; the Editor chain (`--editor`, warm-base + HANDOFF.md fork loop, instance proposes via a ```editor-proposals``` fence and the orchestrator files); in-loop scope triage (TRIAGE_ROLE emits a ```triage-splits``` fence, live.ts files children and turns the parent into an `epic`); and the admissions splitter (`splitRunner.ts`, carves buildable work out of `needs-human` parents). Sibling repo claude-queue-runner has a fifth shape — `--plan` mode (plan.ts), a single one-shot Claude that runs `gh issue create` itself with no rubric, no dedupe and no validation. Every one of these paths is fire-and-forget: there is no interactive session anywhere in the codebase (all harness calls are one-shot `claude -p`), no `plan` role in the `Role` union (taskmap.ts:23), no function that validates a *draft* body before filing, and no assembly of \"existing open issues + label set + rubric\" as planner context. The dedupe/idempotency machinery that does exist (editorState ledger, `split-considered`, `triaged`/`epic`) is per-orchestrator and would have to be generalised. Two concrete defects make the rubric's own recommended formats lossy: `parseDeps` cannot read `Depends on: #N` (the colon form the rubric and EDITOR_ROLE both prescribe), and the audit's `maxCriteria: 4` contradicts the rubric's \"3–6 criteria is the normal case\" band, so ordinary `standard` issues burn a triage session.",
+ "facts": [
+  "docs/ISSUE-RUBRIC.md:23-33 — required body shape is `## Goal` (1-2 sentences), `## Scope` (bullets), `## Acceptance` (`- [ ]` checkbox lines, each independently true).",
+  "docs/ISSUE-RUBRIC.md:35 — \"Bulleted `## Scope` plus a prose `## Acceptance` is also fine — both parse.\" docs/ISSUE-RUBRIC.md:36 — a heading with nothing checkable under it does NOT count.",
+  "docs/ISSUE-RUBRIC.md:37-38 — banned scope-deferring phrases: \"etc\", \"and so on\", \"as needed\", \"various\".",
+  "docs/ISSUE-RUBRIC.md:39-41 — if two issues touch the same shared file, exactly ONE gets an `Owns: <files>` footer and the others say `Depends on: #N`.",
+  "docs/ISSUE-RUBRIC.md:43-48 — every issue MUST carry exactly one of `difficulty:simple` / `difficulty:standard` / `difficulty:hard`.",
+  "docs/ISSUE-RUBRIC.md:50-56 — since #302 the label can only tier an issue UP from what its criteria imply, never down; label↔tokens correlation ρ = −0.056, criteria-count↔tokens ρ = 0.557 over 126 issues.",
+  "docs/ISSUE-RUBRIC.md:61-65 — bands: simple = ≤2 criteria + ONE file/mechanical edit + no new module + nothing depends on it; standard = 3–6 criteria in files that already belong together; hard = ANY of 7+ criteria, 3+ subsystems/packages, new module/schema/contract others depend on, or security/auth/concurrency/data-migration/money.",
+  "docs/ISSUE-RUBRIC.md:92-102 — one issue = one PR; split at 7+ criteria or disjoint-subsystem groups, linked with `Depends on: #N`; splitting may never drop or weaken a criterion.",
+  "docs/ISSUE-RUBRIC.md:104-108 — file dependencies BEFORE dependants so `Depends on: #N` references a real number; Study Room will not start an issue whose dependencies are still open.",
+  "docs/ISSUE-RUBRIC.md:112-123 — verification is `src/issueAudit.ts` (actionability at ingest, `audit-dryrun.ts` for a no-op preview) and `src/difficultyRubric.ts` + `relabel-issues.ts` (reports labels sitting BELOW the implied level; only under-labelling is flagged).",
+  "src/issueAudit.ts:79-84 — DEFAULT_AUDIT_GATE = { minChars: 200, maxChars: 3000, maxCriteria: 4, maxPaths: 8 }.",
+  "src/issueAudit.ts:256,287-296 — auditIssue checks `underspecified` BEFORE `oversized`; zero checkable items ⇒ underspecified with reason 'no acceptance criteria a reviewer could judge the PR against' (or 'has an acceptance section but nothing checkable in it'), plus a second reason when bodyChars < minChars.",
+  "src/issueAudit.ts:271,299 — `triaged`/`epic` settle the SIZE question only and yield verdict 'ready' with reason 'scope already assessed'; they never exempt the criteria (underspecified) check.",
+  "src/issueAudit.ts:301-310 — oversized reasons: `N separately-checkable criteria (limit 4)`, `body is N chars (limit 3000)`, `names N distinct paths (limit 8) — blast radius spans too much`.",
+  "src/issueAudit.ts:317 — NEEDS_DETAIL_LABEL = 'needs-detail'; src/issueAudit.ts:326-340 — needsDetailComment tells the human to add an `## Acceptance` section and says removing the label forces it through unchanged.",
+  "src/issueAudit.ts:100-101 — countCheckable's heading words: acceptance|requirement|deliverable|criteria|definition of done|scope|tasks?|behaviou?r (broader than triage's counter, deliberately).",
+  "src/issueAudit.ts:113 — LABEL_LINE: a non-heading line ≤80 chars, no sentence punctuation, containing a criteria word and ending in a colon (optionally bold) also opens a criteria section — this is what lets `Acceptance criteria carried:` from split pieces parse.",
+  "src/issueAudit.ts:118,147 — MIN_PROSE_CHARS = 40; a criteria section with no bullets but ≥40 chars of prose counts as exactly 1 checkable item.",
+  "src/issueAudit.ts:128-129,144 — checkbox lines (`^\\s*[-*]\\s*\\[[ xX]\\]`) win outright and are counted across the WHOLE body; otherwise the LARGEST criteria-ish section wins (max, not sum).",
+  "src/issueAudit.ts:180-181 — a \"path\" must end in a closed extension list: py|ts|tsx|js|jsx|json|ya?ml|md|toml|cfg|ini|sql|sh|css|html|rs|go|java|rb|php|swift|kt; bare `word/word` and URLs are excluded (issueAudit.ts:193).",
+  "src/issueAudit.ts:212,214-223 — countSubsystems = distinct top-level path segments, excluding NOT_BLAST_RADIUS = test, tests, __tests__, spec, specs, docs, doc (`.github` deliberately NOT excluded).",
+  "src/issueAudit.ts:154-163 — VAGUE list (8 regexes: etc, and so on, and more, as needed/appropriate/required, various, among others, if necessary, where applicable) is counted into `signals.vagueMarkers` but is NEVER used by auditIssue's verdict.",
+  "src/triage.ts:22-23 — TRIAGED_LABEL = 'triaged', EPIC_LABEL = 'epic'. src/triage.ts:51-58 — DEFAULT_TRIAGE_GATE = { maxChars: 3000, maxCriteria: 4 }.",
+  "src/triage.ts:108-114 — needsTriage() returns false when `triaged` or `epic` is present, else true when body.length > 3000 OR countCriteria(body) >= 4. The labels are permanent by design (CLAUDE.md \"The `triaged` / `epic` labels are permanent\").",
+  "src/triage.ts:78-98 — countCriteria: checkboxes win outright; otherwise list items under a heading matching /acceptance|requirement|deliverable|criteria/ counted PER SECTION, largest section wins.",
+  "src/triage.ts:116,129-157 — SPLIT_FENCE = 'triage-splits'; parseTriage accepts `VERDICT: SINGLE_PR` or a fenced JSON array of {title, body, covers}; falls back to any fenced JSON array; a split of <2 usable pieces is treated as SINGLE_PR ('leave it alone' is the safe direction).",
+  "src/roles.ts:174-180 — TRIAGE_ROLE's split triggers: 5+ separately-checkable criteria; criteria groups touching disjoint files/subsystems; sequential inter-criterion dependencies; separate deliverables reviewed against different standards; a criterion no PR can satisfy (hardware/live service/human judgement) — carve it out.",
+  "src/roles.ts:182-185 — SINGLE_PR only when \"roughly four or fewer criteria, confined to files that belong together\"; when unsure, SPLIT.",
+  "src/roles.ts:187-195 — TRIAGE_ROLE may not drop/weaken/rewrite a criterion; every criterion appears in exactly one piece; shared infrastructure gets an `Owns:` footer on ONE piece, e.g. `Owns: vitest.config.ts, tests/**`.",
+  "src/roles.ts:197-209 — TRIAGE_ROLE output contract is exactly one of `VERDICT: SINGLE_PR` + 1-2 sentences, or a ```triage-splits fenced JSON array, most-independent piece first.",
+  "src/roles.ts:288-293 — EDITOR_ROLE tells the Editor to file via `gh issue create` with a `## Goal / ## Deliverables / ## Acceptance` body, split large changes into PR-sized issues linked with `Depends on: #N`, and give exactly ONE issue an `Owns: <files>` footer with the rest depending on it.",
+  "src/roles.ts:302 — EDITOR_ROLE is the ONLY role prompt that embeds DIFFICULTY_RUBRIC; TRIAGE_ROLE, IMPLEMENT_ROLE, ADMISSIONS_SPLIT_ROLE never see the difficulty bands.",
+  "src/roles.ts:308-316 — ROLE_PROMPTS maps implement/review/fix/rewrite/triage/resolve/merge; EDITOR is deliberately excluded (roles.ts:260-268) because it sits upstream of the board 'like the runner's PLAN mode'.",
+  "src/difficultyRubric.ts:35-76 — DIFFICULTY_RUBRIC is the prompt-injectable sheet: exactly one difficulty label, label can only tier UP, count independently checkable criteria + distinct subsystems, the three bands, 'WHEN UNSURE CHOOSE THE HARDER LABEL', '`simple` means TRIVIA'.",
+  "src/difficultyRubric.ts:92-103 — expectedDifficulty(signals): criteria = max(signals.criteria, signals.checkable); criteria >= 7 || subsystems >= 3 ⇒ 'hard'; criteria <= 2 && subsystems <= 1 ⇒ 'simple'; else 'standard'. Subsystems, NOT raw path count.",
+  "src/difficultyRubric.ts:123 — DEFAULT_AC_TIERING = { enabled: true, simpleMax: 2, hardMin: 7 }; configurable field-wise via config.acTiering (config.ts:146,230).",
+  "src/difficultyRubric.ts:200-218 — effectiveDifficulty(): disabled ⇒ label; criteria === 0 ⇒ falls back to the label (source 'label-no-criteria', \"Empty is unknown, never easy\"); otherwise the STRONGER of label vs criteria-implied wins (source 'criteria' or 'label').",
+  "src/difficulty.ts:16,23-25 — DIFFICULTIES = ['simple','standard','hard']; difficultyLabel(d) = `difficulty:${d}`.",
+  "src/difficulty.ts:46-50 — BASE_TIER: simple→haiku, standard→opus, hard→opus. src/difficulty.ts:55,61-64 — speed mode tiers everything up one (haiku→sonnet→opus).",
+  "src/difficulty.ts:86,98,100-104 — inferDifficulty fallback keywords: HARD = migrat|rearchitect|architecture|security|race condition|concurren|deadlock|distributed|auth|encrypt|payment; SIMPLE = typo|rename|formatting|lint|whitespace|bump version|changelog; default 'standard'.",
+  "src/github.ts:305-333 — PIPELINE_LABELS (every label the engine may write; an unregistered label makes `gh --add-label` fail outright): ready, blocked, reviewed-ok, changes-requested, runner-error, spec-changed, already-satisfied, triaged, epic, needs-human, needs-detail, split-considered, difficulty:simple, difficulty:standard, difficulty:hard.",
+  "src/github.ts:335-360 — LABEL_COLORS: ready 2ea44f, blocked b60205, reviewed-ok 0e8a16, changes-requested d93f0b, runner-error e11d21, spec-changed fbca04, already-satisfied 0e8a16, triaged 5319e7, epic 1d76db, needs-human d400d4 (magenta, deliberately unique), needs-detail fef2c0, split-considered c5def5, difficulty:simple bfd4f2, difficulty:standard 5b9bd5, difficulty:hard 1f4e79.",
+  "src/github.ts:730-746 — ensureLabels(repo, run, names = PIPELINE_LABELS) creates only absent labels (no `--force`, so it never rewrites a repo's own label colour/description); labels outside LABEL_COLORS get gh's default colour.",
+  "src/github.ts:126-132 — parseDeps: `/depends on #(\\d+)/gi` over the body, returning `#N` ids. Verified empirically: 'Depends on #5' → ['5']; 'Depends on: #5' → [] (colon breaks it); 'Depends on #12, #13' → ['12'] only.",
+  "src/github.ts:142-153 — parseOwns: `/^\\s*(?:[-*]\\s*)?owns:\\s*(.+)$/gim` — line-anchored, colon REQUIRED, comma-separated globs, backticks stripped, order-preserving and de-duplicated. Multiple `Owns:` lines per issue are allowed.",
+  "src/github.ts:53-56 — openIssue(repo,title,body) = `gh issue create -R <slug> --title … --body …`, returns the new issue URL. src/github.ts:79-85 — openIssueOnce dedupes by exact open title.",
+  "src/github.ts:556-572 — addIssueDeps appends a `## Depends on its pieces` section of `Depends on #N` lines (NO colon) to the parent's body, idempotently, because \"the body is the only place that counts: parseDeps() reads it and nothing else\".",
+  "src/github.ts:157-163,167-172 — difficultyFromLabels accepts `difficulty:simple|standard|hard` OR a bare `simple|standard|hard` label; a `model:haiku|sonnet|opus` label pins the tier and bypasses all difficulty logic (github.ts:185-195,203).",
+  "src/github.ts:196-208 — issueToTask: id = `#N`, role always 'implement', priority = 1000 − issue.number (lower number = higher priority), deps = parseDeps(body), owns = parseOwns(body). github.ts:217-222 — deps pointing at issues not in the open set are dropped.",
+  "src/classify.ts:66 — action RANK: MERGE 0, FIX 1, RESOLVE 2, REVIEW 3, PROMOTE 4, NEEDS_DETAIL 5, TRIAGE 6, IMPLEMENT 7.",
+  "src/classify.ts:166-168 — PARKED_LABELS = [runner-error(GIVE_UP), spec-changed, needs-human, already-satisfied]. `needs-detail` is NOT a parking label and `difficulty:*` are not either.",
+  "src/classify.ts:286 — an `epic` label yields NO action (an epic is a tracker, never a unit of work). src/classify.ts:252-254 — an issue with any still-open `Depends on` dep yields no action.",
+  "src/classify.ts:293-306 — NEEDS_DETAIL is only emitted when `cfg.issueAudit?.enforce` is truthy; an already-`needs-detail` issue yields null (\"waiting on a human\").",
+  "src/classify.ts:316-318 — TRIAGE fires when `cfg.triage !== false` AND (audit.verdict === 'oversized' OR needsTriage(issue)).",
+  "src/live.ts:1167 — the live engine calls `classify(ri, rp, { autoMerge: canAutoMerge(cfg) })` — it passes NO `issueAudit` and NO `triage` key, so `issueAudit.enforce` is always undefined and the NEEDS_DETAIL action is unreachable in the running engine.",
+  "src/live.ts:1942 — scope-triage child body footer: `<piece.body>\\n\\n---\\nCarved out of #<parent> by scope triage. Covers: <covers>`.",
+  "src/live.ts:1962-1966 — every scope-triage child is labelled `difficulty:<expectedDifficulty(auditSignals(title+body))>` derived from the PIECE's own text, not inherited from the parent.",
+  "src/live.ts:1968-1971 — if fewer than 2 pieces actually file, the parent is left intact (no epic). src/live.ts:1984,2002 — then addIssueDeps(parent, children) runs BEFORE `epic` is applied.",
+  "src/live.ts:1926-1929 — `triaged` is applied to the parent whether or not it split; failing to apply it is logged as \"re-triaged every heartbeat until the watchdog quarantines it\".",
+  "src/live.ts:964-984 — readSpec sends only a GUARD for CLAUDE.md (the CLI auto-injects it) plus `docs/SPEC.md` in full when it differs byte-wise; prompts.ts:36 caps the spec block at MAX_SPEC_CHARS = 12000.",
+  "src/buildability.ts:75 — NEEDS_HUMAN_LABEL = 'needs-human'. src/buildability.ts:25-45 — BlockerKind = external-assets | hardware | credentials | licensing | human-judgement | live-service | human-verification.",
+  "src/buildability.ts:81-106 — label blockers: `needs-gpu` ONLY when paired with `type:research`; `type:licensing`; `needs-(credentials|secrets|account)`; `needs-(human|design|decision)`.",
+  "src/buildability.ts:193-209 — one repo LABEL alone ⇒ 'blocked'; prose needs ≥2 distinct blocker kinds or ≥2 hits ⇒ 'blocked'; exactly 1 prose hit ⇒ 'unsure' (changes nothing).",
+  "src/admissions.ts:84-88 — the sweep applies `needs-human` for blocked and `needs-detail` for underspecified only; `oversized` is deliberately left to triage. src/admissions.ts:124-181 — `apply:false` is the default read-only form; apply adds the label + one marker-guarded comment.",
+  "src/admissionsSplit.ts:40,43 — ADMISSIONS_SPLIT_FENCE = 'admissions-split'; SPLIT_CONSIDERED_LABEL = 'split-considered'.",
+  "src/admissionsSplit.ts:47-92 — ADMISSIONS_SPLIT_ROLE output contract: one fenced `admissions-split` JSON OBJECT {reason, remainder, pieces:[{title, body:\"## Goal…## Acceptance\\n- [ ] …\", covers}]}; `\"pieces\": []` is an explicitly correct answer.",
+  "src/admissionsSplit.ts:138-141 — a piece with no title or no body is dropped rather than filed (\"filing it anyway just moves the underspecification onto a new number\").",
+  "src/splitRunner.ts:104-105 — admissions-split child footer: `Carved out of #<parent>, which needs a human for: <remainder>.\\nCovers: <covers>`. splitRunner.ts:128,139 — every child is labelled `triaged` AT BIRTH plus a derived `difficulty:*`; splitRunner.ts:155 — the parent gets `split-considered` LAST.",
+  "src/carveOut.ts:37 — CARVED_FROM = `/^\\s*Carved out of #(\\d+)\\b/im`; this is the only machine-readable parent link and both writers must keep that exact line prefix.",
+  "src/editor.ts:225,258-262 — PROPOSAL_FENCE = 'editor-proposals'; each element is {\"key\": \"<stable-slug>\", \"title\": \"…\", \"body\": \"<## Goal / ## Deliverables / ## Acceptance>\"}; the key is the idempotency unit.",
+  "src/editor.ts:292-293 — a proposal with no key or no title is dropped. src/editor.ts:523 — the filed body gets `<!-- editor-key: KEY -->` appended so the ledger can be rebuilt from GitHub.",
+  "src/editor.ts:350,435 — every Editor issue is labelled 'editor-proposed' (plus `extraLabels`); index.ts:211 — `--park` adds NEEDS_HUMAN_LABEL so a timer-started sweep cannot auto-build its own proposals.",
+  "src/editor.ts:249-251 — the per-pass workPrompt forbids running `gh` and forbids the instance filing issues itself (\"You PROPOSE; the orchestrator files\"), which directly contradicts EDITOR_ROLE's `gh issue create` instruction at roles.ts:288.",
+  "src/editor.ts:239-246 — already-filed idempotency KEYS (not titles, not existing GitHub issues) are the only dedupe context injected into a pass.",
+  "src/editor.ts:304-312,320-327,345-349,408-411,491 — guards: no-code (git status --porcelain non-empty ⇒ `checkout -- . && clean -fd`), maxInstances default 12, stallPasses default 2, budgetTokens 0 = off, maxIssuesPerChunk default 5, minIssuesPerChunk default 2.",
+  "src/editorState.ts:41-60,106-112 — editor-status.json is the ORCHESTRATOR's ledger (filed[], passes[], sessionId, token totals), deliberately out of reach of the instance; keys are normalised lowercase/hyphenated.",
+  "src/index.ts:148-232 — `--editor` requires `--goal`; target repo from `--repo` or config.repo; `--cwd` else a shallow clone; knobs `--max-instances`, `--max-issues`, `--budget`, `--model`, `--handoff`, `--park`. index.ts:107-142 — `--all --owner <user>` sweeps every repo an owner has, `--dry-run` files nothing.",
+  "src/dashboard.ts:377-410,1056-1058 — POST /api/editor/start | /api/editor/stop; GET /api/editor/status returns {running, log, handoff, configRepo}. dashboard.ts:1088 — POST /api/admissions/split/stop; dashboard.ts:864-922 — the admissions sweep runs report-first, apply second, one at a time.",
+  "webui/dashboard.js:748-778 — the Editor tab composes the free-text Goal from `editor-presets.json` systemType + lens chips (editor-presets.json: cli, web-spa, http-api, pipeline, llm-agent, library, each with a cited standard) — this is the closest thing to a planning UI today, and it is a single textarea submitted once.",
+  "src/taskmap.ts:23 — Role = 'triage'|'implement'|'review'|'fix'|'rewrite'|'resolve'|'merge'. There is no 'plan' or 'author' role anywhere.",
+  "claude-queue-runner/DESIGN.md:178-195 — PLAN mode: one Claude instance, locates the spec, decomposes into PR-sized issues, creates each via `gh issue create` with `## Goal / ## Deliverables / ## Acceptance` + `Depends on: #N`, labels foundational `ready` / dependants `blocked` / all `milestone`, orders creation so referenced numbers exist first, writes no code.",
+  "claude-queue-runner/src/plan.ts:11-54 — runPlan is one-shot and non-interactive; the AGENT runs `gh issue create` itself (plan.ts:33), there is no proposal fence, no dedupe, no difficulty label, no rubric, and no validation — success is just `res.ok` from the CLI.",
+  "claude-queue-runner/src/plan.ts:16 — it force-creates a `milestone` label with `--force`, the opposite of Study Room's deliberately non-destructive ensureLabels.",
+  "config.json:1-40 — the live config sets repo/repos, optimizationMode 'token', autoMerge true, editor.auto.enabled false; it contains NO `issueAudit` key, confirming the needs-detail gate is off in practice.",
+  "relabel-issues.ts:49-56,74-82 — only RAISES labels; an issue labelled above its implied level is left alone; and a raise that does not change which model builds it (standard→hard under `speed` mode) is NOT written, with the note \"an issue with 7+ criteria wants splitting, not a stronger label — rubric rule 3\".",
+  "untriage-oversized.ts:32 — SPLIT_AT = 5, kept deliberately in step with TRIAGE_ROLE, to clear `triaged` off measurably-oversized issues so a corrected role can re-assess them.",
+  "audit-dryrun.ts:1-35, admissions-dryrun.ts, ac-tiering-dryrun.ts — read-only previews that tally verdicts across the configured boards without labelling, commenting or dispatching."
+ ],
+ "reusable": [
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\issueAudit.ts",
+   "what": "Pure, synchronous scorer: countCheckable / countCriteria / countPaths / countSubsystems / countVague → IssueAudit {verdict, reasons, signals}, plus needsDetailComment.",
+   "why_keep": "This is the entire mechanical definition of 'rubric-compliant'. A planning terminal can run it on a DRAFT body and give the user a verdict before anything is filed, at zero token cost, and the reasons strings are already human-readable.",
+   "coupling": "Imports only `RawIssue` (a {number,title,body,labels} shape) from github.ts and countCriteria/TRIAGED_LABEL/EPIC_LABEL from triage.ts. auditIssue() needs a RawIssue, so a draft must be wrapped in a synthetic one — trivial to lift, or add an `auditBody(body, labels)` entry point."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\difficultyRubric.ts",
+   "what": "DIFFICULTY_RUBRIC prompt constant + expectedDifficulty / expectedDifficultyWith / effectiveDifficulty / underLabelledBy / criteriaCount, with AcTieringConfig thresholds.",
+   "why_keep": "The only rubric text already written for a model to read, and the only place the label↔criteria asymmetry is implemented. A planner must both inject the constant and run expectedDifficulty over its own draft to pick the label it files.",
+   "coupling": "Imports Difficulty (difficulty.ts) and IssueAuditSignals (issueAudit.ts) as types only. Fully portable."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\triage.ts",
+   "what": "countCriteria (strict size counter), needsTriage gate, parseTriage over the ```triage-splits``` fence, TRIAGED/EPIC label constants.",
+   "why_keep": "A planning terminal must not emit issues that will immediately be triaged; needsTriage(draft) is the exact predicate to check against before filing, and parseTriage is a working, tolerant fence parser to copy.",
+   "coupling": "Type-only import of RawIssue. Pure, no network, no clock — already unit-tested (test/triage.test.ts)."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\buildability.ts",
+   "what": "assessAdmission: label + prose blocker detection → buildable/blocked/unsure with traceable evidence, and needsHumanComment.",
+   "why_keep": "A planner should refuse (or explicitly park) a drafted issue that a worktree-bound student can never finish — cheaper to catch at authoring time than at ingest.",
+   "coupling": "Type-only import of RawIssue. Self-contained regex tables."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\editor.ts + src\\editorState.ts",
+   "what": "The proposal/file split: instance emits a fenced JSON array with idempotency keys; orchestrator files, labels, dedupes against a durable on-disk ledger; no-code guard, stall guard, budget guard, adaptive chunk sizing, resume via stored sessionId.",
+   "why_keep": "This is the proven architecture for 'a model authors issues but never touches GitHub'. A planning terminal is the same contract with a human in the loop instead of a HANDOFF.md, and the ledger + `<!-- editor-key: … -->` footer already solve re-filing across restarts.",
+   "coupling": "editor.ts imports WarmCliSession, roles.EDITOR_ROLE, github.{openIssue,addLabel,ensureLabels}, editorState. All the filing/labelling/dedupe side is already injectable (opts.fileIssue / applyLabel / ensureLabel), so the orchestrator half lifts out cleanly; only the warm-session driver would be swapped for an interactive one."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\github.ts",
+   "what": "openIssue / openIssueOnce / addLabel / ensureLabels / PIPELINE_LABELS / LABEL_COLORS / parseDeps / parseOwns / addIssueDeps / fetchIssues.",
+   "why_keep": "The whole GitHub write surface plus the canonical label registry and colours. ensureLabels' no-`--force` policy and openIssueOnce's title dedupe are both hard-won and must survive.",
+   "coupling": "Shells `gh` via an injectable GhRunner, so it is testable without network. parseDeps/parseOwns are pure and exported."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\roles.ts",
+   "what": "TRIAGE_ROLE (the split bar + Owns: convention + output contract) and EDITOR_ROLE (issue-body shape + Depends-on/Owns + DIFFICULTY_RUBRIC).",
+   "why_keep": "~90% of the text a planner prompt needs already exists here, measured and revised (#201's 'DEFAULT TO SPLITTING'). A PLAN_ROLE should be assembled from these blocks rather than written fresh.",
+   "coupling": "Byte-stability is load-bearing for the warm-session cache (prompts.ts:9-30) — a new role constant must be a separate exported constant, never an interpolation."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\admissionsSplit.ts",
+   "what": "ADMISSIONS_SPLIT_ROLE + splitPrompt + parseAdmissionsSplit + splitComment/nothingSeparableComment.",
+   "why_keep": "Best-written example of a 'carve work out and state the remainder' contract, including an explicit 'returning zero pieces is a correct answer' clause — exactly the humility a planner needs when the user's idea is not yet buildable.",
+   "coupling": "Type-only import of Blocker. Pure parser."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\relabel-issues.ts + audit-dryrun.ts + untriage-oversized.ts + admissions-dryrun.ts + ac-tiering-dryrun.ts",
+   "what": "Read-only board scanners that print exactly what would change.",
+   "why_keep": "The dry-run-first pattern is the repo's house style for anything that writes to GitHub, and a planning terminal's 'here is what I would file' step is the same thing. relabel-issues' 'only write a label that changes routing' rule is a reusable filing policy.",
+   "coupling": "Top-level await scripts importing src/*; would need wrapping in functions to be callable from a server."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\dashboard.ts + webui\\dashboard.js + editor-presets.json",
+   "what": "ManagedProcess-backed start/stop/status endpoints with a streamed log, plus the chip→Goal composer UI.",
+   "why_keep": "The transport, the log-tail UI and the preset chip bank are directly reusable as the shell for a planning terminal; only the one-shot POST needs to become a turn loop.",
+   "coupling": "dashboard.ts is 60k and heavily coupled to the Protector; the Editor tab slice (dashboard.ts:352-418, 994-1009, 1056-1058) is the part to lift."
+  }
+ ],
+ "pain_points": [
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\github.ts:126",
+   "issue": "parseDeps cannot read the `Depends on: #N` format that the rubric, EDITOR_ROLE and queue-runner PLAN mode all prescribe — the colon breaks the regex — and it captures only the FIRST number on a multi-dep line.",
+   "evidence": "Regex is /depends on #(\\d+)/gi. Verified by running it: 'Depends on: #5' → [], 'Depends on #12, #13' → ['12'] only. Meanwhile docs/ISSUE-RUBRIC.md:41,96 and roles.ts:289 both instruct the colon form, and plan.ts:36 instructs 'Depends on: #N, #M'. The engine's own writer (github.ts:570) uses the no-colon form, so only engine-authored deps actually gate dispatch."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\issueAudit.ts:82",
+   "issue": "The audit's maxCriteria of 4 contradicts the rubric's own `standard` band of 3–6 criteria ('the normal case'), so a perfectly rubric-compliant standard issue is routed to TRIAGE — and TRIAGE_ROLE only splits at 5+, so a 4-criteria issue reliably burns an Opus session to be told SINGLE_PR.",
+   "evidence": "DEFAULT_AUDIT_GATE.maxCriteria = 4 (issueAudit.ts:82) and DEFAULT_TRIAGE_GATE.maxCriteria = 4 (triage.ts:57) → classify.ts:316 emits TRIAGE; roles.ts:175 says split at '5 or more'; roles.ts:182 says SINGLE_PR at 'roughly four or fewer'. docs/ISSUE-RUBRIC.md:64 calls 3–6 criteria the normal case."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\live.ts:1167",
+   "issue": "The `needs-detail` enforcement gate is unreachable in the running engine: classify() is called without an `issueAudit` option, so `cfg.issueAudit?.enforce` is always undefined and the NEEDS_DETAIL action never fires.",
+   "evidence": "live.ts:1167 `classify(ri, rp, { autoMerge: canAutoMerge(cfg) })`; classify.ts:300 requires cfg.issueAudit?.enforce; config.json has no issueAudit key; and `needs-detail` is absent from PARKED_LABELS (classify.ts:166-168), so even the admissions-applied label does not stop a dispatch."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\docs\\ISSUE-RUBRIC.md:1",
+   "issue": "The rubric is a document no code imports. Only the smaller DIFFICULTY_RUBRIC constant reaches a model, and only inside EDITOR_ROLE — so the acceptance-criteria shape, the vague-phrase ban, the path limit, the Owns/Depends-on convention and the file-deps-first ordering are never shown to any model that files issues.",
+   "evidence": "Grep for ISSUE-RUBRIC across the repo returns only comments and docs (relabel-issues.ts:1, config.ts:142, difficultyRubric.ts:108, live.ts:1960, test/acTiering.test.ts:24). roles.ts:302 injects DIFFICULTY_RUBRIC into EDITOR_ROLE alone; TRIAGE_ROLE and ADMISSIONS_SPLIT_ROLE never see it."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\editor.ts:249",
+   "issue": "EDITOR_ROLE and workPrompt give the instance contradictory instructions about filing: the cached role block says 'File each change as its own issue via `gh issue create`', the per-pass block says 'Do NOT run `gh`, do NOT create issues yourself'.",
+   "evidence": "roles.ts:288 vs editor.ts:249-251. The role block is the byte-stable cached prefix, so the contradiction is present in every pass."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\editor.ts:435",
+   "issue": "Editor-filed issues never receive a difficulty label even though EDITOR_ROLE embeds the rubric demanding exactly one — the IssueProposal type has no label field and the orchestrator applies only 'editor-proposed' plus extraLabels.",
+   "evidence": "IssueProposal = {key,title,body} (editor.ts:92-97); filing loop applies `[label, ...extraLabels]` (editor.ts:435). Contrast live.ts:1962 and splitRunner.ts:138, which both derive and apply difficultyLabel(expectedDifficulty(...)) for their children."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\issueAudit.ts:154",
+   "issue": "The rubric's ban on scope-deferring phrases is scored but never enforced: countVague feeds signals.vagueMarkers and no verdict path reads it.",
+   "evidence": "VAGUE regex list at issueAudit.ts:154-163, surfaced in IssueAuditSignals (issueAudit.ts:46), but auditIssue (issueAudit.ts:256-314) only tests checkable, bodyChars, criteria and paths."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\issueAudit.ts:307",
+   "issue": "maxPaths (8) is checked and reported as a blast-radius reason, but expectedDifficulty deliberately ignores paths in favour of subsystems — so the audit and the tiering rubric measure blast radius two different ways and can disagree on the same issue.",
+   "evidence": "issueAudit.ts:307-309 gates on signals.paths > 8; difficultyRubric.ts:94-100 explicitly rejects path counting ('Scored on paths, every one of scope triage's own split pieces came out `hard`')."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\triage.ts:22",
+   "issue": "`triaged` and `epic` are permanent by design, so any issue authored or assessed under an older prompt keeps a stale verdict forever; the only remedy is a manual script.",
+   "evidence": "triage.ts:111 short-circuits needsTriage on either label; CLAUDE.md's 'The consequence: a stale verdict is never revisited' documents 40/40 SINGLE_PR verdicts surviving three weeks; untriage-oversized.ts exists solely to hand them back."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\issueAudit.ts:125",
+   "issue": "Three different criteria counters coexist with different semantics (triage's strict countCriteria, the audit's broad countCheckable, emptyRun's readCriteria over student output), and effectiveDifficulty silently takes max(criteria, checkable) — so 'how many criteria does this issue have' has no single answer an author can predict.",
+   "evidence": "triage.ts:78 countCriteria vs issueAudit.ts:125 countCheckable (documented as deliberately different at issueAudit.ts:88-99) vs emptyRun.ts:88 criteriaCount; difficultyRubric.ts:133 takes the max of the first two."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\contextCard.ts:222",
+   "issue": "CARD_LABEL 'context-card' and the Editor's 'editor-proposed' label are written by the engine but are not in PIPELINE_LABELS, the list whose stated purpose is 'every label the engine WRITES'.",
+   "evidence": "PIPELINE_LABELS (github.ts:305-333) omits both; editor.ts:358 works around it by calling ensureLabels(repo, undefined, [l]) with an explicit name list."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-study-room\\src\\cliStudent.ts",
+   "issue": "There is no interactive model session anywhere in the codebase — every harness call is a one-shot `claude -p` with a single prompt string and a parsed final text; WarmCliSession resumes/forks but still runs one prompt to completion.",
+   "evidence": "prompts.ts builds whole prompt strings per dispatch; editor.ts:393,413 and splitRunner.ts:79 each call session.run/harness.run once per pass; dashboard exposes only POST /api/editor/start (dashboard.ts:1057). No stdin loop, no streamed turn, no conversation state on disk other than the CLI's own session file."
+  },
+  {
+   "path": "C:\\Users\\pegan\\dev\\claude-queue-runner\\src\\plan.ts:33",
+   "issue": "queue-runner PLAN mode is the anti-pattern Study Room has since moved away from: the agent runs `gh issue create` itself, with no proposal fence, no dedupe ledger, no difficulty labels, no rubric injection, no per-issue validation, and success measured only by the CLI exit code.",
+   "evidence": "plan.ts:33-41 embeds the whole contract in a prompt; plan.ts:47-53 returns res.ok; plan.ts:16 force-creates the `milestone` label with --force, which Study Room's ensureLabels explicitly refuses to do (github.ts:726-729)."
+  }
+ ],
+ "v2_implications": [
+  "KEEP the proposal/orchestrator split as the non-negotiable spine of any planning terminal: the model emits a fenced, parsed, validated structure and NEVER runs `gh`. Both surviving authoring paths already work this way (editor.ts:249-251, triage.ts:118-128) and both cite the same reason — an instance cannot dedupe against what a wiped predecessor filed, and cannot be stopped from filing junk. A terminal that lets the user 'just tell Claude to file it' regresses to queue-runner PLAN mode.",
+  "KEEP the pure text checkers (issueAudit, triage.countCriteria, buildability, difficultyRubric) as the validation layer, and run them on the DRAFT before filing rather than at ingest. They cost zero tokens, are already unit-tested, and turn 'is this rubric-compliant' from a judgement into a function call. Add an `auditBody(body, labels?)` entry point so a draft need not be wrapped in a synthetic RawIssue (issueAudit.ts:256 currently takes RawIssue).",
+  "CHANGE the rubric from a doc into a prompt constant. docs/ISSUE-RUBRIC.md is the source of truth for authors but no model ever reads it; only DIFFICULTY_RUBRIC (difficultyRubric.ts:35) is injectable, and only EDITOR_ROLE gets it (roles.ts:302). v2 needs an ISSUE_RUBRIC_PROMPT (or a loader that reads docs/ISSUE-RUBRIC.md at startup) covering body shape, the checkbox convention, the vague-phrase ban, the criteria bands, the Owns/Depends-on convention and the file-deps-first ordering — and a test asserting the doc and the constant do not drift, matching the pattern at difficultyRubric.ts:108-112.",
+  "FIX the `Depends on` contract before any planner emits it. Either widen parseDeps to `/depends on:?\\s*(#\\d+(?:\\s*,\\s*#\\d+)*)/gi` (multi-number, optional colon) or make the rubric and every role prompt say the exact no-colon single-dep-per-line form the engine writes (github.ts:570). Today a planner following docs/ISSUE-RUBRIC.md:41 verbatim produces a dependency graph the engine cannot see, which means dependants dispatch immediately and build against code that does not exist yet.",
+  "RECONCILE the criteria thresholds or the planner will author issues that are instantly triaged. Pick one number: either raise DEFAULT_AUDIT_GATE.maxCriteria / DEFAULT_TRIAGE_GATE.maxCriteria to 7 to match the rubric's split bar and the hardMin tiering band, or narrow the rubric's `standard` band to 3–4. As it stands a 4-criteria issue passes the rubric and still pays a triage session to be told SINGLE_PR (issueAudit.ts:82, triage.ts:57, roles.ts:175-183).",
+  "A planning terminal must be given, per turn: (1) the rubric constant; (2) the target repo's CLAUDE.md — note live.ts:964-984 deliberately does NOT re-send CLAUDE.md to board students because the CLI auto-injects it, but a planner that runs OUTSIDE the repo checkout gets no such injection, so it must be sent explicitly and capped (prompts.ts:36, MAX_SPEC_CHARS 12000); (3) the current open issues as {number, title, labels, first-line-of-body} for dedupe and for real `Depends on` numbers — fetchIssues already returns number/title/body/labels (github.ts:115-123); (4) the writable label set PIPELINE_LABELS with colours (github.ts:305-360) so it never proposes a label `gh --add-label` will reject; (5) any existing `Owns:` declarations across open issues (parseOwns over the board) so a new issue depends on the owner rather than re-declaring the file.",
+  "Its OUTPUT contract should be a fenced JSON array in the established shape, extended with the two fields the Editor is missing: `{key, title, body, labels: [\"difficulty:…\", …], dependsOn: [<draft-index or #N>], owns: [glob], covers?}`. Filing order must be topological over `dependsOn` (docs/ISSUE-RUBRIC.md:104-108), with the orchestrator substituting real issue numbers into each dependant's body AFTER its dependency is filed — nothing does this today; addIssueDeps (github.ts:556) only handles the epic→children direction.",
+  "Validation before filing should be a hard gate with an explicit override, mirroring how the engine already behaves: reject a draft whose auditIssue verdict is `underspecified`; warn and offer a split when it is `oversized` or when needsTriage() would fire; reject when assessAdmission() is `blocked` unless the user opts to file it parked `needs-human` (the `--park` precedent, index.ts:211); set the difficulty label from expectedDifficulty(auditSignals(draft)) and allow the user to raise but never lower it (difficultyRubric.ts:147-149, relabel-issues.ts:49-56). Show the user the failing `reasons` strings — they are already written for a human (issueAudit.ts:289-308).",
+  "KEEP a durable ledger keyed by idempotency key, exactly as editorState.ts does, and keep the `<!-- editor-key: … -->` body footer (editor.ts:523) so the ledger is rebuildable from GitHub. An interactive session will be resumed, abandoned and re-run; without this the second run re-files the first run's issues.",
+  "KEEP the read-only-preview-then-apply house style: the terminal should show the full set of drafts with their computed verdicts, labels and dependency order, and file only on an explicit confirm — the same shape as runAdmissions(apply:false) (admissions.ts:118-123) and every *-dryrun.ts script.",
+  "DROP the idea of re-using a board Role. Authoring is upstream of the board, like the Editor (roles.ts:260-268); a `plan` role added to the Role union would pollute the pool simulation and break the ROLES↔ROLE_PROMPTS coupling test (roles.test.ts). Add a separate byte-stable PLAN_ROLE constant instead, and keep it out of ROLE_PROMPTS.",
+  "The interactive transport is genuinely new work and is the main build cost: nothing in the repo streams a model turn or accepts follow-up input. Options are (a) drive the Claude Code CLI in a real terminal window as the pr-loop skill does, (b) extend WarmCliSession with a resume-per-turn loop (`--resume <uuid> --fork-session` already gives cheap turn-over-turn continuity, CLAUDE.md 'Core concepts'), or (c) a WebSocket/SSE upgrade of the dashboard's ManagedProcess log tail (dashboard.ts:355-410). Option (b) preserves the cached-prefix economics the whole engine is built on.",
+  "Mark planner-authored issues `triaged` at birth when the planner itself did the sizing, exactly as splitRunner.ts:128 does and for the documented reason (eight unlabelled children cost nine Opus triage sessions on 2026-08-16). But note this inherits the permanence problem (triage.ts:22-23, CLAUDE.md): a planner prompt change will not reach already-authored issues, so ship the untriage-oversized.ts escape hatch alongside it.",
+  "If the planning terminal is to replace queue-runner PLAN mode, it must also cover PLAN's one feature Study Room lacks: bootstrapping a board from a spec file when there are zero existing issues (DESIGN.md:178-195). Keep the spec auto-discovery order (SPEC.md → docs/*.md → README) but drop PLAN's `ready`/`blocked`/`milestone` labelling — Study Room gates on deps-closed, not on a `ready` label (classify.ts:24-26,252-254), so those labels would be inert at best and `blocked` would need a PROMOTE cycle to clear."
+ ],
+ "open_questions": [
+  "Is the `Depends on: #N` colon mismatch a known bug or has the board simply never used the colon form? Worth checking a live repo's issue bodies (`gh issue list --json body`) to see how many open issues have deps the engine cannot see.",
+  "Should the planning terminal file issues directly, or emit them as Editor-style proposals into an existing review queue so the user confirms in the dashboard rather than in the terminal? The repo's stated safety model is 'every design decision surfaces as a reviewable issue before anything gets built' (CLAUDE.md Editor section) — an interactive human IS that review, but the `--park` precedent suggests the author disagrees when a timer is involved.",
+  "Does the user want the planning terminal to also EDIT existing issues (fix a `needs-detail` issue in place, add missing criteria) or only create new ones? Nothing in Admissions ever edits an issue body by design (admissions.ts:22-27 'NOTHING IS EVER CLOSED OR EDITED'), and addIssueDeps (github.ts:556) is the single exception.",
+  "Which repo does the planning terminal run against — the multi-repo `repos` list (config.json:36-39) or one target picked per session? The Editor takes a single `--repo`/`--cwd`; a terminal that spans boards would need repo-qualified dedupe like the dashboard's cross-repo keys.",
+  "Should `issueAudit.enforce` be turned on as part of this work? It has been shipped-but-off since it landed (classify.ts:45-55 'Run it in observation mode, read the counts, THEN enforce') and live.ts:1167 never passes it. If a planning terminal guarantees compliant issues going forward, enforcement mainly affects the backlog of hand-written ones.",
+  "Is there an appetite to unify the three criteria counters, or is the deliberate divergence (issueAudit.ts:88-99) load-bearing enough to keep? A planner that reports a count to the user needs to name which counter it used.",
+  "Does the interactive session need to survive a dashboard restart (ledger + conversation), or is a single sitting enough? editorState.ts solves the ledger half; the conversation half would need the CLI session uuid persisted the way EditorState.sessionId is (editorState.ts:44-46).",
+  "What is the intended relationship to the `app-testing-agent` revamp tab (README.md:25, dashboard.ts GET /api/revamp), which already 'proposes no code' and renders a prioritised change plan? It may be a second producer of planner input rather than a separate feature."
+ ]
+}

@@ -1,0 +1,359 @@
+{
+ "key": "chat-terminal-options",
+ "summary": "Recommendation: build the planning terminal as **(E) a local MCP server in the dashboard + (B) `claude -p` with bidirectional stream-json as the chat transport**, with **(D) a `/plan-feature` skill** as the zero-effort day-1 path. Do **not** build on (C) the Agent SDK for subscription auth, and treat (A) node-pty as an optional fidelity upgrade, not the foundation.\n\nWhy, against the three criteria:\n\n1) **Rides the subscription legitimately.** Anthropic's Claude Code legal page carves out exactly one safe path: \"Nor does it prevent an end user from signing in to the **unmodified Claude Code binary** with their own Claude subscription.\" Options A, B and D all spawn the unmodified `claude` binary, which does its own OAuth — your dashboard never collects, stores, or intermediates a credential (the explicit prohibition). Option E never touches Claude at all. Option C is the outlier: the Agent SDK overview carries an explicit note — \"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods… instead\" — and the SDK is governed by the **Commercial** ToS. It will work technically (the TS SDK spawns the same CLI and inherits its OAuth), but it is the one option where the official docs tell you not to.\n\n2) **Works for both providers.** MCP is the only mechanism all three harnesses natively speak (Claude Code `.mcp.json`/`--mcp-config`; Codex `~/.codex/config.toml [mcp_servers.*]`; Gemini CLI `~/.gemini/settings.json mcpServers`). Put `lint_issue`/`file_issue` behind MCP once and every harness gets them for free. The chat transport is *not* portable: Claude's `--input-format stream-json` has no Codex equivalent — Codex's analogue is `codex app-server` (JSON-RPC 2.0: `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`, `item/agentMessage/delta`) or `codex exec --json` + `codex exec resume --last`. Budget one adapter per provider behind a shared interface, which your repo already models as `Harness` (src/harness.ts, src/harnesses.ts).\n\n3) **Build effort.** You are already ~70% of the way to (B): `src/cliStudent.ts:304` already spawns `claude -p --output-format stream-json --verbose` and parses NDJSON events, and `src/warmCliSession.ts` already manages `--session-id`/`--resume`/`--fork-session`. Making it interactive is: add `--input-format stream-json`, stop calling `stdin.end()`, and write one NDJSON user message per turn. Zero native dependencies, zero Windows build risk. Option A costs you a native module (node-pty), an Electron ABI rebuild, Spectre-mitigated MSVC libs, and — critically — you still cannot reliably extract a structured issue draft out of an ANSI TUI, so you would need the MCP tool anyway.\n\nTwo Windows landmines specific to your machine: your Claude Code is **v2.1.158**, which predates the fix for \"an unreadable stdin on Windows crashed the session or made it exit silently with no output\" (fixed v2.1.211) — upgrade before relying on stream-json stdin. And `src/cliStudent.ts:309` spawns with `shell: true`, routing stdin through a cmd.exe shim; drop that for the interactive path and invoke the resolved binary from `src/claudeBin.ts` directly.",
+ "findings": [
+  {
+   "claim": "Anthropic's Claude Code legal page explicitly permits an end user signing into the UNMODIFIED Claude Code binary with their own subscription, while prohibiting third-party developers from offering claude.ai login, routing requests through Free/Pro/Max credentials on behalf of users, or collecting/storing/intermediating Claude.ai credentials or session tokens. Verbatim: 'Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not collect, store, or intermediate Claude.ai credentials or session tokens — sign-in to a Claude account must complete through Anthropic's own flow.' … 'Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription.' This is the legal basis for options A, B and D.",
+   "source_url": "https://code.claude.com/docs/en/legal-and-compliance",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Same page: 'Claude Code usage is subject to the Anthropic Usage Policy. Advertised usage limits for Pro and Max plans assume ordinary, individual usage of Claude Code and the Agent SDK.' — i.e. personal, individual, human-in-the-loop use of a local planning terminal is contemplated; industrial-scale automation is not.",
+   "source_url": "https://code.claude.com/docs/en/legal-and-compliance",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "The Agent SDK overview carries an explicit prohibition note: 'Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead.' It also states 'Use of the Claude Agent SDK is governed by Anthropic's Commercial Terms of Service.' This makes option (C) the weakest on the legitimacy axis.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/overview",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Anthropic's support article confirms the Agent SDK subscription-credit change was PAUSED: 'Claude Agent SDK, `claude -p`, and third-party app usage still draw from your subscription's usage limits.' The planned (now paused) scheme was separate monthly Agent SDK credits: Pro $20, Max 5x $100, Max 20x $200, Team Standard $20, Team Premium $100, Enterprise Premium $200, effective June 15 2026. This confirms `claude -p` usage is billed against the subscription today — i.e. option B rides the subscription as designed.",
+   "source_url": "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13; pause notice dated June 15 2026"
+  },
+  {
+   "claim": "Policy timeline: April 4 2026 original ban on third-party agents using Claude subscription OAuth; May 13 2026 reinstatement announced via a metered 'Agent SDK credit' pool; June 15 2026 the change was due to take effect and was paused on that day. Anthropic's Lydia Hallie: 'To add some clarity: you don't pay extra. It's the same subscription, same price per month.' Anthropic has said it will give advance notice before any future change.",
+   "source_url": "https://venturebeat.com/technology/anthropic-reinstates-openclaw-and-third-party-agent-usage-on-claude-subscriptions-with-a-catch",
+   "confidence": "community-report",
+   "date_of_source": "2026 (May–June); accessed 2026-09-13"
+  },
+  {
+   "claim": "Bidirectional multi-turn streaming in -p mode is a first-class, shipped feature. Verified against the locally installed CLI (v2.1.158): '--input-format <format>  Input format (only works with --print): \"text\" (default), or \"stream-json\" (realtime streaming input)'. Decisively, there is a dedicated ack flag: '--replay-user-messages  Re-emit user messages from stdin back on stdout for acknowledgment (only works with --input-format=stream-json and --output-format=stream-json)' — a flag that only makes sense for a long-lived bidirectional stdin.",
+   "source_url": "local: `claude --help` on Claude Code v2.1.158 (Windows 11)",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "The stdin NDJSON shape for --input-format stream-json is one JSON object per line: {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Your prompt here\"}}. Multiple lines = multiple turns without relaunching the binary, and guidance can be injected while the model is mid-request. Streaming JSON input requires -p and --output-format stream-json. Note this exact usage is acknowledged as under-documented in anthropics/claude-code issue #24594.",
+   "source_url": "https://github.com/anthropics/claude-code/issues/24594",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "The official SDKUserMessage shape (which is what the SDK writes onto that same stdin) adds parent_tool_use_id and supports multimodal content arrays: {type:'user', message:{role:'user', content:'…' | [{type:'text',text:…},{type:'image',source:{type:'base64',media_type:'image/png',data:…}}]}, parent_tool_use_id: null}. Streaming input mode is documented as the PREFERRED mode and is the only one supporting image attachments, queued messages, real-time interruption, and natural multi-turn context.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "A reverse-engineered protocol spec confirms the exact SDK invocation is `claude --output-format stream-json --input-format stream-json --verbose`, and documents the control protocol layered on the same pipes: type 'control_request' (subtype 'initialize' registering hooks and sdk_mcp_servers), 'control_response' (subtype success|error), 'sdk_control_request' (CLI→client for permission requests carrying tool_name/tool_input, and MCP calls via subtype 'mcp_message' with JSONRPC-wrapped requests answered in an 'mcp_response' field), all correlated by request_id. Stdout types: system, assistant, user, stream, result, control.",
+   "source_url": "https://github.com/Roasbeef/claude-agent-sdk-go/blob/main/docs/cli-protocol.md",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Official stdout event contract for rendering tool calls in the dashboard UI: `--output-format stream-json --verbose --include-partial-messages` emits one JSON object per line; the LAST line is a `result` message with final text, cost and session metadata. `system/init` is the first event and carries model, tools, mcp_servers (each with name+status), mcp_server_errors, plugins, plugin_errors, and a `capabilities` array for feature detection (v2.1.205+). `system/api_retry` events carry attempt, max_retries, retry_delay_ms, error_status and an error category. Subagent messages carry parent_tool_use_id = the spawning tool call ID (null for the main conversation).",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Session continuity across turns is solved by --session-id (must be a valid UUID) / --resume <id-or-.jsonl-path> / --fork-session, and since v2.1.223 Claude Code finds a session by ID in ANY project on the machine, not just the cwd. Documented pattern: session_id=$(claude -p \"Start a review\" --output-format json | jq -r '.session_id'); claude -p \"Continue\" --resume \"$session_id\". Note: `--continue` skips sessions created with `claude -p` unless you also pass `-p`.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "CRITICAL Windows caveat for option B on this machine: 'Before v2.1.211, an unreadable stdin on Windows crashed the session or made it exit silently with no output.' The locally installed Claude Code is v2.1.158 — BELOW that threshold. Upgrade before building the stream-json stdin transport.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13; local version verified 2026-09-13"
+  },
+  {
+   "claim": "Do NOT use --bare for the planning terminal: 'In bare mode, Claude Code never reads OAuth credentials or the system keychain.' and 'bare mode doesn't use your subscription login'. Local help confirms: 'Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth and keychain are never read).' Bare mode also skips hooks, skills, custom commands, subagents, plugins, MCP servers, auto memory and CLAUDE.md discovery — i.e. it defeats options D and E simultaneously.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "--append-system-prompt works in INTERACTIVE mode, not just -p (community-reported as of v1.0.51 and confirmed present with no -p restriction in the local v2.1.158 help: '--append-system-prompt <prompt>  Append a system prompt to the default system prompt'). NOTE: v2.1.158 does NOT have the newer `--append-system-prompt-file` / `--system-prompt-file` variants that current docs reference — pass a string, or put the planner persona in a project CLAUDE.md or a skill.",
+   "source_url": "https://claudelog.com/faqs/how-to-update-system-prompt/",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13; local help verified 2026-09-13"
+  },
+  {
+   "claim": "Skills give you the /plan-feature slash command for option D, and they work in -p mode too: 'User-invoked skills and custom commands work in -p mode: include /skill-name in the prompt string and Claude Code expands it before running.' SKILL.md frontmatter: name, description, disable-model-invocation, user-invocable, allowed-tools, argument-hint, arguments. Substitutions: $ARGUMENTS, $0/$1/$2, $name, ${CLAUDE_SKILL_DIR}, ${CLAUDE_PROJECT_DIR}, ${CLAUDE_SESSION_ID}. Inline shell via !`command` runs BEFORE Claude sees the skill — so the skill can inject live `gh label list` output.",
+   "source_url": "https://code.claude.com/docs/en/skills",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Claude Code MCP config for option E: project-scoped `.mcp.json` with {\"mcpServers\":{\"name\":{\"type\":\"http\",\"url\":\"…\",\"headers\":{…},\"timeout\":600000}}}; stdio form is {\"command\":…,\"args\":[…],\"env\":{…}}. CLI: `claude mcp add --transport http <name> <url>`, `claude mcp add --transport stdio <name> -- <cmd> [args]`, `claude mcp add-json <name> '<json>'`, scopes via --scope local|project|user. Env expansion supports ${VAR}, ${VAR:-default}, ${CLAUDE_PROJECT_DIR}, ${CLAUDE_PLUGIN_ROOT}. `--mcp-config` accepts files or inline JSON; `--strict-mcp-config` ignores all other MCP config. With -p, Claude Code waits for pending servers up to MCP_TIMEOUT (30s default) and reports failures in system/init's mcp_server_errors.",
+   "source_url": "https://code.claude.com/docs/en/mcp",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Codex MCP config for option E: `~/.codex/config.toml` (or project-scoped `.codex/config.toml`, trusted projects only). Stdio: [mcp_servers.context7] command=\"npx\" args=[\"-y\",\"@upstash/context7-mcp\"] env_vars=[\"LOCAL_TOKEN\"] plus [mcp_servers.context7.env]. HTTP: [mcp_servers.figma] url=\"https://mcp.figma.com/mcp\" bearer_token_env_var=\"FIGMA_OAUTH_TOKEN\" http_headers={\"X-Figma-Region\"=\"us-east-1\"}. Full key set per the config reference: command, args, env, env_vars, url, bearer_token_env_var, http_headers, startup_timeout_sec (default 10), tool_timeout_sec (default 60), enabled, tools.<tool>. CLI: `codex mcp add <name> --env K=V -- <cmd>`, `codex mcp add <name> --url https://…`, `codex mcp list`, `codex mcp login <name>`. Streamable HTTP with bearer and OAuth is supported.",
+   "source_url": "https://learn.chatgpt.com/docs/extend/mcp",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Gemini CLI MCP config for option E: `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project), top-level `mcpServers` key. One of command | url (SSE) | httpUrl (streamable HTTP) is required; optional args, headers, env (with $VAR expansion), cwd, timeout (ms), trust (bypass tool confirmations), includeTools, excludeTools. Example: {\"mcpServers\":{\"httpServer\":{\"httpUrl\":\"http://localhost:3000/mcp\",\"headers\":{\"X-Api-Key\":\"secret-key\"},\"timeout\":5000}}}. Note the key is `httpUrl`, NOT `url`, for streamable HTTP — a common cross-harness config mistake.",
+   "source_url": "https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Codex non-interactive multi-turn: `codex exec \"prompt\"`, resume with `codex exec resume --last \"next instruction\"` or `codex exec resume <SESSION_ID>`. Machine-readable: `codex exec --json` (stdout becomes JSONL with event types thread.started, turn.started, turn.completed, turn.failed, item.started, item.completed, error), `codex exec --output-last-message <path>`, `codex exec --output-schema ./schema.json`. Other flags: --ephemeral, --sandbox workspace-write|danger-full-access, --ignore-user-config, --ignore-rules, --skip-git-repo-check, --include-plan-tool. v0.132.0 (May 20 2026) added `codex exec resume --output-schema`.",
+   "source_url": "https://learn.chatgpt.com/docs/non-interactive-mode",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Codex's real analogue of Claude's stream-json is the App Server, not exec: `codex app-server` speaks bidirectional JSON-RPC 2.0 over stdio (JSONL), or `codex app-server --listen ws://127.0.0.1:4500`, or `--listen unix://`. Methods: thread/start, thread/resume, turn/start, turn/steer (append input to an ACTIVE turn — the steering primitive Claude lacks), turn/interrupt. Notifications: turn/started, turn/completed, item/started, item/completed, item/agentMessage/delta, thread/archived, thread/closed. WebSocket auth uses `Authorization: Bearer <token>` at handshake. `codex mcp-server` is the older stdio JSON-RPC surface and is being retired in favour of app-server (deprecation noted around v0.149.1).",
+   "source_url": "https://learn.chatgpt.com/docs/app-server",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Codex custom slash commands live in $CODEX_HOME/prompts/ (default ~/.codex/prompts/), .md files only, invoked as /prompts:<name>. Placeholders $1–$9, $ARGUMENTS, and named uppercase placeholders ($FILE, $TICKET_ID) supplied as KEY=value. IMPORTANT: custom prompts are DEPRECATED in favour of Codex Skills — write the /plan-feature persona as a Codex Skill for longevity. Codex's project-instruction file is AGENTS.md (the CLAUDE.md analogue).",
+   "source_url": "https://developers.openai.com/codex/custom-prompts",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Codex CLI on a ChatGPT Plus/Pro login supports scripted `codex exec` workflows after `codex login` — OpenAI's own help centre documents using Codex with your ChatGPT plan, and Plus/Pro/Pro-20x tiers differ only by quota multiplier (Pro $100 = 5x Plus, Pro $200 = 20x). OpenAI has published no equivalent of Anthropic's 'OAuth is for first-party surfaces only' restriction, so the Codex leg of a dual-provider design is less policy-constrained than the Claude leg.",
+   "source_url": "https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13 (page itself returned 403 to automated fetch; claim assembled from search result excerpts + developers.openai.com/codex/pricing)"
+  },
+  {
+   "claim": "node-pty latest STABLE on npm is 1.1.0; dependency is node-addon-api ^7.1.0 (Node-API, therefore ABI-stable across Node versions). Its install script is `node scripts/prebuild.js || node-gyp rebuild`. Reading the actual prebuild.js: it DOWNLOADS NOTHING — it only checks whether the local `prebuilds/${process.platform}-${process.arch}` directory (shipped inside the npm tarball; 'prebuilds/' is in the package.json `files` array) exists, and exits 1 ('Rebuilding because directory … does not exist') to trigger node-gyp if absent. Setting npm_config_build_from_source=true DELETES the prebuilds and forces a source build.",
+   "source_url": "https://raw.githubusercontent.com/microsoft/node-pty/main/scripts/prebuild.js",
+   "confidence": "verified-source-code",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "If node-pty falls through to a source build on Windows, binding.gyp turns on Spectre mitigation ('SpectreMitigation': 'Spectre') and compiles two win targets (conpty linking -lshlwapi, conpty_console_list) from src/win/. Missing Spectre libs produce MSB8040; fix is VS Installer → Individual components → search 'Spectre' → 'MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs'. You also need Python, MSVC v143, and the Windows 11 SDK (Desktop development with C++).",
+   "source_url": "https://raw.githubusercontent.com/microsoft/node-pty/main/binding.gyp",
+   "confidence": "verified-source-code",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "node-pty requires Windows 10 build 1809 (18309) or later and uses the ConPTY API exclusively; winpty support was REMOVED in v1.2.0-beta.7 (Jan 15). The 1.2.0-beta line is at beta.15 with ongoing ConPTY fixes (beta.15 fixed a ConPTY deadlock when debuggers pause the console output worker; beta.13 fixed a use-after-free in Windows PTY handle access; beta.14 surfaced CreateProcessW failures as exit events instead of uncaught exceptions). Windows 11 Home 26200 is far above the floor.",
+   "source_url": "https://github.com/microsoft/node-pty",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Zero-compile alternative for Windows: @lydell/node-pty@1.2.0-beta.15, 'Smaller distribution of node-pty', distributes per-platform prebuilds as optionalDependencies (@lydell/node-pty-win32-x64, -win32-arm64, -darwin-x64, -darwin-arm64, -linux-x64, -linux-arm64). README: 'only works on platforms with prebuilt binaries and never calls node-gyp.' Size is 'around half of microsoft/node-pty on Windows'. This is the single best de-risking move if you do build option A.",
+   "source_url": "https://github.com/lydell/node-pty",
+   "confidence": "verified-source-code",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Real-world Windows 11 + Electron + node-pty + xterm.js stack that WORKS, from a writeup specifically about building a custom terminal for Claude Code: Electron 41.2.0, node-pty 1.1.0, @electron/rebuild 4.0.3, Node 22.22.0, xterm.js 6.0.0. Required manual patches: generate GenVersion.h manually, replace winpty.gyp's `'<!( cmd /c \"cd shared && GetCommitHash.bat\")'` with `'none'`, and set 'SpectreMitigation' to 'false' in BOTH winpty.gyp and binding.gyp. Build with `npx @electron/rebuild -m . -w node-pty`. Bundler: mark node-pty external in vite.config.ts; electron-builder needs \"asarUnpack\": [\"node_modules/node-pty/**/*\"]. Automate patching in postinstall or it breaks on a fresh clone. NOTE: this project already sets \"asar\": false in package.json, which sidesteps the asarUnpack issue.",
+   "source_url": "https://note.com/villhell_note/n/nf4e1909b19cb?hl=en",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Electron ABI is the real node-pty risk, not Node 22/24: 'node-pty is a native addon compiled against a specific Node ABI, and when loaded inside Electron (which bundles its own Node with a different ABI), it would fail with an error about module compilation against a different Node.js ABI version. The fix was to rebuild the addon against Electron's ABI using electron-rebuild.' Despite node-pty 1.1.0 using node-addon-api, practitioners still report needing @electron/rebuild — the shipped prebuild targets Node's ABI, and the Node-API promise is not reliably delivered end-to-end. Local environment note: Node v24.15.0 is installed here, while package.json pins electron ^33.2.0 (Node 20.x ABI) — a two-ABI mismatch on day one.",
+   "source_url": "https://www.electronjs.org/docs/latest/tutorial/using-native-node-modules",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13; local node -v verified 2026-09-13"
+  },
+  {
+   "claim": "The Agent SDK (option C) is at @anthropic-ai/claude-agent-sdk v0.3.270, engines node>=18, zero runtime deps, peerDeps zod ^4.0.0 / @anthropic-ai/sdk >=0.93.0 / @modelcontextprotocol/sdk ^1.29.0. Versions track the CLI 1:1 (0.3.N bundles Claude Code 2.1.N). It offers exactly what a planning terminal wants — query({prompt: AsyncIterable<SDKUserMessage>}), systemPrompt {type:'preset'|'append', value}, mcpServers, hooks, canUseTool(request, options), resume/forkSession/continue, includePartialMessages, permissionMode, settingSources, agents, pathToClaudeCodeExecutable, and in-process tools via createSdkMcpServer({name,version,tools}) + tool(name, desc, zodShape, handler). Technically ideal; blocked only by the auth policy note.",
+   "source_url": "https://code.claude.com/docs/en/agent-sdk/typescript",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "For option D+ (dashboard pushes text into the user's ALREADY-RUNNING interactive Claude session) there is a supported local IPC surface: each session binds an inbox socket — a Unix domain socket on macOS/Linux, a NAMED PIPE on native Windows — whose path is exported as CLAUDE_CODE_MESSAGING_SOCKET and shown in /status's 'Peer address' row (prefixed uds:). A per-session token is exported as CLAUDE_CODE_MESSAGING_TOKEN. 'A script posting to its own session's socket can send {\"type\":\"auth\",\"token\":\"<token>\"} as the first line of its connection.' On native Windows that auth line is REQUIRED — 'Claude Code closes any connection whose first line isn't a valid auth line'. Requires Claude Code v2.1.234+ on native Windows (v2.1.224+ elsewhere). Claude Code closes a connection that hasn't sent a complete line within 30 seconds.",
+   "source_url": "https://code.claude.com/docs/en/cross-session-messaging",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Channels are a newer, sanctioned 'push events into a running session' mechanism (research preview): a channel is an MCP server named in `claude --channels plugin:<name>@<marketplace>`, messages arrive in the model's context as <\\channel source=\"plugin:…\"> events, and Claude replies back through the channel's `reply` tool — a genuine two-way chat bridge into a live interactive session. 'Pro and Max users without an organization skip these checks entirely: channels are available and users opt in per session with --channels.' Constraint for now: --channels only accepts plugins from an Anthropic-maintained allowlist (telegram, discord, imessage, fakechat); a custom dashboard channel needs --dangerously-load-development-channels. Channel plugins require Bun. Neither flag appears in claude --help during preview.",
+   "source_url": "https://code.claude.com/docs/en/channels",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Plugin packaging for shipping the whole planning experience as one unit (option D at scale): .claude-plugin/plugin.json manifest (only `name` is required), with conventional dirs skills/, commands/, agents/, hooks/hooks.json, .mcp.json, bin/ (added to the Bash tool's PATH), settings.json. Manifest fields skills/commands/agents/hooks/mcpServers accept custom paths. Install locally with `claude --plugin-dir ./my-plugin` (session-scoped) or scaffold with `claude plugin init my-tool` into ~/.claude/skills/<name>/ which auto-loads every project with no install step. Plugin MCP servers start automatically when the plugin is enabled — so ONE plugin can ship both /plan-feature and the lint_issue/file_issue MCP server.",
+   "source_url": "https://code.claude.com/docs/en/plugins-reference",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "This repo already implements most of option B's plumbing. src/cliStudent.ts:304 builds args ['-p','--output-format','stream-json','--verbose', ...perm, ...model, ...toolList, ...session] and src/cliStudent.ts:286-292 already emits --session-id / --resume / --fork-session. src/warmCliSession.ts:17 documents the warm-session strategy ('FIRST task: claude -p --session-id <uuid>; LATER tasks: claude -p --resume <uuid> --fork-session'). src/claudeBin.ts already resolves the Windows binary across ~/.local/bin, ~/.claude/local, %APPDATA%/npm and %ProgramFiles%/nodejs with PATHEXT probing. src/harness.ts / src/harnesses.ts / src/openCodeHarness.ts already define a pluggable multi-provider Harness interface with a `warmSessions` capability flag — the exact seam a Codex harness plugs into. The dashboard is a plain node:http server (src/dashboard.ts:1107) on port 4600 (src/dashboard.ts:40, DASHBOARD_PORT), and src/github.ts already has openIssue/openIssueOnce/findOpenIssueByTitle/addLabel/addIssueDeps/fetchIssueSpec via the gh CLI.",
+   "source_url": "local: C:/Users/pegan/dev/claude-study-room/src/{cliStudent,warmCliSession,claudeBin,harness,harnesses,dashboard,github}.ts",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Known bug class to avoid when wiring option B: spawning with shell:true on Windows routes stdin through a cmd.exe shim and is a documented source of 'prompt is never delivered' failures with --input-format stream-json. src/cliStudent.ts:309 currently does exactly this (`spawnFn(claudeBin, args, { cwd, shell: true, windowsHide: true })`). A related public report: '--input-format stream-json now requires --print, and --print can't read a PTY stdin — prompt is never delivered'. For the interactive path, spawn the resolved absolute binary from src/claudeBin.ts with shell:false and a piped (not inherited, not PTY) stdin.",
+   "source_url": "https://github.com/zeenie-ai/OpenCompany/issues/134",
+   "confidence": "community-report",
+   "date_of_source": "accessed 2026-09-13; local line verified 2026-09-13"
+  },
+  {
+   "claim": "Frontend package versions for either option: @xterm/xterm 6.0.0 (zero runtime deps, 'Full xterm terminal, in your browser'), @xterm/addon-fit 0.11.0. @modelcontextprotocol/sdk is at 1.30.0 (engines node>=18) and now bundles hono/@hono/node-server and express 5 — it can serve streamable HTTP directly, but you can also mount its transport on the existing node:http server rather than adding express.",
+   "source_url": "https://registry.npmjs.org/@xterm/xterm/latest",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Claude Code can itself act as an MCP server via `claude mcp serve`, which is the inverse of option E (harness-as-tool rather than dashboard-as-tool). Combined with Codex's `codex app-server` and `codex mcp-server`, both CLIs can be embedded either direction — but for cross-provider tool sharing, dashboard-as-MCP-server (option E) is the direction that needs only ONE implementation.",
+   "source_url": "https://code.claude.com/docs/en/mcp",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "Permission handling for an interactive planning terminal: with -p the built-in starting permission mode is Manual on every plan, so you must pass one explicitly. Use --permission-mode default or acceptEdits and --allowedTools with permission-rule syntax (e.g. \"Bash(gh issue list *)\" — the space before * matters; 'Bash(git diff*)' would also match 'git diff-index'). Do NOT use --dangerously-skip-permissions for a user-facing chat surface. Newer builds add --permission-prompts none for unattended runs (requires v2.1.259+; NOT present in the locally installed v2.1.158).",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  },
+  {
+   "claim": "For getting a well-formed issue OUT of the conversation without parsing prose, use --output-format json with --json-schema (present in local v2.1.158 help): the response carries the validated object in a `structured_output` field alongside session_id and usage. Invalid schemas now error ('Error: --json-schema is not a valid JSON Schema'); before v2.1.205 they were silently ignored. `format` keywords are accepted but treated as annotations, not enforced. This is a cheaper alternative to an MCP tool if you only need extraction, though MCP is what gives you cross-provider parity.",
+   "source_url": "https://code.claude.com/docs/en/headless",
+   "confidence": "verified-official-doc",
+   "date_of_source": "accessed 2026-09-13"
+  }
+ ],
+ "exact_commands_or_apis": [
+  "# ---------- OPTION B: bidirectional stream-json planning chat (RECOMMENDED transport) ----------",
+  "claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --replay-user-messages --session-id <uuid-v4> --permission-mode default --mcp-config C:/Users/pegan/dev/claude-study-room/.claude/planner-mcp.json --append-system-prompt \"You are a feature-planning partner. Interview the user, then draft GitHub issues and call the plan__lint_issue and plan__file_issue tools.\"",
+  "# resume the same planning thread on a later dashboard visit:",
+  "claude -p --input-format stream-json --output-format stream-json --verbose --resume <uuid-v4>",
+  "# fork a throwaway branch off a warm planning base (pattern already in src/warmCliSession.ts:17):",
+  "claude -p --resume <uuid-v4> --fork-session --input-format stream-json --output-format stream-json --verbose",
+  "# stdin: one NDJSON object per user turn, DO NOT call stdin.end() between turns:",
+  "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"I want a feature that auto-labels stale issues\"}}",
+  "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Split that into three issues\"},\"parent_tool_use_id\":null}",
+  "# stdin with an image attachment (streaming input mode only):",
+  "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Here's the mockup\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"<b64>\"}}]},\"parent_tool_use_id\":null}",
+  "# stdout event types to render: system(init|api_retry|plugin_install|permission_denied) | assistant | user | stream_event | result",
+  "# filter text deltas for a live-typing effect:",
+  "claude -p \"Write a poem\" --output-format stream-json --verbose --include-partial-messages | jq -rj 'select(.type == \"stream_event\" and .event.delta.type? == \"text_delta\") | .event.delta.text'",
+  "# capture a session id for later resume:",
+  "session_id=$(claude -p \"Start planning\" --output-format json | jq -r '.session_id')",
+  "# structured extraction of a finished issue draft (alternative to MCP, Claude-only):",
+  "claude -p \"Emit the drafted issue\" --output-format json --json-schema '{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"},\"labels\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"title\",\"body\"]}'",
+  "# ---------- OPTION E: dashboard-as-MCP-server, registered in all three harnesses ----------",
+  "npm i @modelcontextprotocol/sdk@1.30.0 zod@^4",
+  "# Claude Code (project scope, committed):  C:/Users/pegan/dev/claude-study-room/.mcp.json",
+  "{\"mcpServers\":{\"plan\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4600/mcp\",\"headers\":{\"X-Plan-Token\":\"${PLAN_TOKEN}\"},\"timeout\":600000}}}",
+  "claude mcp add --transport http plan http://127.0.0.1:4600/mcp --scope project",
+  "claude mcp add-json plan '{\"type\":\"http\",\"url\":\"http://127.0.0.1:4600/mcp\"}'",
+  "claude mcp list && claude mcp get plan",
+  "claude -p --mcp-config '{\"mcpServers\":{\"plan\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4600/mcp\"}}}' --strict-mcp-config",
+  "# Codex CLI:  C:/Users/pegan/.codex/config.toml   (or ./.codex/config.toml in a trusted project)",
+  "[mcp_servers.plan]\\nurl = \"http://127.0.0.1:4600/mcp\"\\nbearer_token_env_var = \"PLAN_TOKEN\"\\nstartup_timeout_sec = 30\\ntool_timeout_sec = 120",
+  "codex mcp add plan --url http://127.0.0.1:4600/mcp",
+  "codex mcp add plan --env PLAN_TOKEN=xyz -- node C:/Users/pegan/dev/claude-study-room/src/mcp/planServer.js",
+  "codex mcp list",
+  "# Gemini CLI:  C:/Users/pegan/.gemini/settings.json  (NOTE: key is httpUrl, not url)",
+  "{\"mcpServers\":{\"plan\":{\"httpUrl\":\"http://127.0.0.1:4600/mcp\",\"headers\":{\"X-Plan-Token\":\"…\"},\"timeout\":15000,\"trust\":false}}}",
+  "# MCP tools to expose: plan__lint_issue, plan__file_issue, plan__list_repo_labels, plan__find_duplicate_issue",
+  "# ---------- OPTION D: /plan-feature skill (lowest effort, provider-mirrored) ----------",
+  "C:/Users/pegan/dev/claude-study-room/.claude/skills/plan-feature/SKILL.md",
+  "# SKILL.md frontmatter:  name / description / disable-model-invocation: true / allowed-tools: Bash(gh issue *) Read / argument-hint: [feature idea] / arguments: [idea]",
+  "# live context injection inside SKILL.md:  !`gh label list --limit 100`   and   !`gh issue list --state open --limit 30`",
+  "# substitutions available: $ARGUMENTS $0 $1 $idea ${CLAUDE_SKILL_DIR} ${CLAUDE_PROJECT_DIR} ${CLAUDE_SESSION_ID}",
+  "claude   # then type: /plan-feature auto-label stale issues",
+  "claude -p \"Run /plan-feature auto-label stale issues\"   # skills expand in -p mode too",
+  "claude --plugin-dir C:/Users/pegan/dev/claude-study-room/planner-plugin   # session-scoped plugin load",
+  "claude plugin init plan-feature   # scaffolds ~/.claude/skills/plan-feature/ , auto-loads everywhere",
+  "# Codex mirror:  C:/Users/pegan/.codex/prompts/plan-feature.md  (invoked as /prompts:plan-feature; DEPRECATED -> prefer a Codex Skill)  + AGENTS.md at repo root",
+  "# ---------- OPTION A: PTY (only if you need TUI fidelity) ----------",
+  "npm i @lydell/node-pty@1.2.0-beta.15 @xterm/xterm@6.0.0 @xterm/addon-fit@0.11.0   # zero-compile path, never calls node-gyp",
+  "npm i node-pty@1.1.0   # microsoft build; install script = `node scripts/prebuild.js || node-gyp rebuild`",
+  "npx @electron/rebuild -m . -w node-pty   # required for Electron ABI (@electron/rebuild 4.0.3)",
+  "# electron-builder: this repo already sets \"asar\": false, which removes the need for \"asarUnpack\": [\"node_modules/node-pty/**/*\"]",
+  "# if source build is forced, VS 2022 needs: MSVC v143, Windows 11 SDK, Desktop development with C++, AND 'MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs' (else MSB8040)",
+  "# ---------- OPTION C: Agent SDK (NOT recommended on subscription) ----------",
+  "npm i @anthropic-ai/claude-agent-sdk@0.3.270   # peerDeps: zod ^4.0.0, @anthropic-ai/sdk >=0.93.0, @modelcontextprotocol/sdk ^1.29.0; engines node>=18",
+  "# query({prompt: AsyncIterable<SDKUserMessage>, options:{systemPrompt:{type:'append',value},mcpServers,hooks,canUseTool,resume,forkSession,includePartialMessages,permissionMode,settingSources,agents,pathToClaudeCodeExecutable}})",
+  "# createSdkMcpServer({name,version,tools:[tool(name, description, zodShape, handler)]})  -- in-process tools, no subprocess",
+  "# ---------- Codex bidirectional transport (the stream-json analogue) ----------",
+  "codex app-server                                   # JSON-RPC 2.0 over stdio (JSONL)",
+  "codex app-server --listen ws://127.0.0.1:4500      # WebSocket; Authorization: Bearer <token> at handshake",
+  "codex app-server --listen unix://",
+  "# methods: thread/start, thread/resume, turn/start, turn/steer, turn/interrupt",
+  "# notifications: turn/started, turn/completed, item/started, item/completed, item/agentMessage/delta, thread/archived, thread/closed",
+  "codex exec --json \"draft issues for auto-labeling stale issues\"   # JSONL: thread.started, turn.started, turn.completed, turn.failed, item.started, item.completed, error",
+  "codex exec resume --last \"split that into three issues\"",
+  "codex exec resume <SESSION_ID>",
+  "codex exec --output-last-message C:/tmp/last.txt --output-schema C:/tmp/issue.schema.json \"…\"",
+  "codex login   # ChatGPT Plus/Pro sign-in; credentials under ~/.codex/",
+  "# ---------- Option D+ : push text into a RUNNING interactive Claude session (Windows named pipe) ----------",
+  "# env exported into hooks/Bash of that session: CLAUDE_CODE_MESSAGING_SOCKET , CLAUDE_CODE_MESSAGING_TOKEN ; path also shown by /status 'Peer address' row",
+  "# first line on the pipe (REQUIRED on native Windows):  {\"type\":\"auth\",\"token\":\"<CLAUDE_CODE_MESSAGING_TOKEN>\"}",
+  "# requires Claude Code v2.1.234+ on native Windows; connection closed if no complete line within 30s",
+  "# ---------- Channels (sanctioned two-way push into a live session; research preview) ----------",
+  "claude --channels plugin:fakechat@claude-plugins-official",
+  "claude --dangerously-load-development-channels   # for a channel you build yourself",
+  "/plugin marketplace add anthropics/claude-plugins-official",
+  "# ---------- local facts verified on this machine, 2026-09-13 ----------",
+  "claude --version  -> 2.1.158 (Claude Code)",
+  "node -v -> v24.15.0 ; npm -v -> 11.12.1",
+  "codex --version -> command not found (Codex CLI is NOT installed)",
+  "dashboard: node:http server, C:/Users/pegan/dev/claude-study-room/src/dashboard.ts:1107 , PORT = process.env.DASHBOARD_PORT || 4600 (src/dashboard.ts:40)",
+  "existing claude spawn: C:/Users/pegan/dev/claude-study-room/src/cliStudent.ts:304 (args) and :309 (spawn with shell:true -- change this for the interactive path)",
+  "existing session flags: C:/Users/pegan/dev/claude-study-room/src/cliStudent.ts:286-292 ; warm-session strategy documented at src/warmCliSession.ts:17",
+  "existing gh issue helpers: C:/Users/pegan/dev/claude-study-room/src/github.ts:53 openIssue, :79 openIssueOnce, :61 findOpenIssueByTitle, :507 addLabel, :556 addIssueDeps, :383 fetchIssueSpec",
+  "provider abstraction seam: C:/Users/pegan/dev/claude-study-room/src/harness.ts:39 (capabilities.warmSessions), src/harnesses.ts, src/claudeCodeHarness.ts, src/openCodeHarness.ts"
+ ],
+ "policy_notes": [
+  "DECISIVE CARVE-OUT (code.claude.com/docs/en/legal-and-compliance): 'Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription.' Spawning the stock `claude` binary from your own local dashboard, where the binary performs its own OAuth against your own account, is the sanctioned shape. Options A, B and D all sit inside this carve-out.",
+  "DECISIVE PROHIBITION (same page): 'Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not collect, store, or intermediate Claude.ai credentials or session tokens — sign-in to a Claude account must complete through Anthropic's own flow.' Practical rule for your build: NEVER read ~/.claude/.credentials.json, never scrape a token out of the keychain, never add a 'Sign in with Claude' button, never forward a token to a remote service. Let the CLI own auth end-to-end.",
+  "Same page: 'The Claude Code binary must not be modified. Claude Code must be installed and run as published by Anthropic, and customers may not remove, disable, or restrict any authentication method built into it.' Do not patch, repackage, or vendor the CLI; resolve and exec the installed one (src/claudeBin.ts already does this correctly).",
+  "Same page: 'Advertised usage limits for Pro and Max plans assume ordinary, individual usage of Claude Code and the Agent SDK.' A human-in-the-loop planning chat is ordinary individual usage. A dashboard that fans out N background planning agents on a timer is not, and would be the thing that draws enforcement. Keep the planning terminal human-driven.",
+  "Same page: 'Anthropic reserves the right to take measures to enforce these restrictions and may do so without prior notice.'",
+  "AGENT SDK WARNING (code.claude.com/docs/en/agent-sdk/overview): 'Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead.' Plus: 'Use of the Claude Agent SDK is governed by Anthropic's Commercial Terms of Service.' Option C is therefore the one option where the docs point away from subscription auth. In practice the TS SDK spawns the same CLI and inherits its OAuth, so it will WORK on your login — but you would be building on a path Anthropic has told you not to build on, and you could not share the dashboard with anyone.",
+  "CURRENT BILLING STATE (support.claude.com article 15036540): the Agent SDK credit change is PAUSED — 'Claude Agent SDK, `claude -p`, and third-party app usage still draw from your subscription's usage limits.' So today, `claude -p` planning turns consume your normal Pro/Max limits, not a separate pool. The paused scheme would have given Pro $20 / Max 5x $100 / Max 20x $200 per month, non-rollover, no spillover into the general allowance. Anthropic says it will give advance notice before any future change — re-check this article before you ship.",
+  "POLICY TIMELINE worth tracking: Feb 2026 Anthropic added the explicit 'Authentication and credential use' section; Apr 4 2026 ban on third-party agents on subscription OAuth; May 13 2026 reinstatement announced with metered Agent SDK credits; Jun 15 2026 change was due and was paused that day. The area is volatile — design so that swapping the auth path (subscription CLI <-> ANTHROPIC_API_KEY) is a one-line change in the harness adapter.",
+  "BRANDING (agent-sdk/overview): if you ever distribute this, you may not use 'Claude Code' or 'Claude Code Agent' as a product/feature name, nor Claude Code-branded ASCII art or visuals that mimic Claude Code. Permitted: 'Claude Agent', 'Claude' inside a menu already labeled 'Agents', or '{YourName} Powered by Claude'. An xterm.js pane that renders the real Claude Code TUI (option A) is fine because it IS Claude Code, but do not clone its look in your own chrome.",
+  "OPTION E IS POLICY-FREE: an MCP server you host on localhost that exposes lint_issue/file_issue never touches Anthropic credentials or Anthropic servers. It is the only component with zero policy exposure, and it is also the only one that works identically for Claude Code, Codex and Gemini CLI. This is why it should be the backbone rather than an add-on.",
+  "CODEX SIDE: OpenAI documents using Codex CLI with a ChatGPT Plus/Pro plan including scripted `codex exec` workflows after `codex login`, and has published no equivalent 'OAuth is first-party only' restriction. The Codex leg of a dual-provider design is materially less policy-constrained than the Claude leg. Quotas are tier-multiplied (Pro $100 = 5x Plus, Pro $200 = 20x Plus).",
+  "CHANNELS are the one Anthropic-sanctioned way to push external events into a running interactive session, and 'Pro and Max users without an organization skip these checks entirely'. But during the research preview --channels only accepts plugins from an Anthropic-maintained allowlist; a dashboard-authored channel needs --dangerously-load-development-channels, and the flag syntax and protocol contract may change. Do not put this on the critical path yet."
+ ],
+ "recommendations": [
+  "RANK 1 — Build (E) the MCP server first, before any UI. Add `src/mcp/planServer.ts` using @modelcontextprotocol/sdk@1.30.0, mounted as a streamable-HTTP route on the EXISTING node:http server (src/dashboard.ts:1107, port 4600) rather than standing up express. Expose four tools: `lint_issue` (title/body/labels/acceptance-criteria validation against your existing rubric — src/difficultyRubric.ts, src/buildability.ts, src/issueAudit.ts already encode the house rules), `find_duplicate_issue` (wrap src/github.ts:61 findOpenIssueByTitle), `list_repo_labels`, and `file_issue` (wrap src/github.ts:79 openIssueOnce). This is the one artifact that serves Claude Code, Codex and Gemini CLI with a single implementation, carries zero policy risk, and is the only reliable way to get a STRUCTURED issue out of a conversation.",
+  "RANK 2 — Build (B) as the in-dashboard chat transport, reusing what you already have. Fork src/cliStudent.ts into a `runCliChat()` that (a) adds `--input-format stream-json`, (b) does NOT call stdin.end(), (c) writes one NDJSON `{type:'user',message:{role:'user',content:…}}` line per user turn, (d) adds `--replay-user-messages` so the UI can ack, (e) adds `--include-partial-messages` for live typing. Render stdout by `type`: `system/init` -> show model + connected MCP servers, `assistant` -> text and tool_use blocks, `user` -> tool_result blocks, `stream_event` -> text deltas, `result` -> turn-complete + cost. Persist the planning thread with `--session-id <uuid>` and reopen with `--resume` exactly as src/warmCliSession.ts:17 already describes. Est. 1-2 days, zero native deps.",
+  "RANK 3 — Ship (D) `/plan-feature` on day one as the fallback and as the shared prompt source of truth. Write ONE `.claude/skills/plan-feature/SKILL.md` with `disable-model-invocation: true`, `allowed-tools: Bash(gh issue *) Read`, and live context injection via !`gh label list` / !`gh issue list`. The same file is what --append-system-prompt-equivalent content the dashboard feeds Claude, and it is what you mirror into AGENTS.md for Codex. This means the persona is authored once and consumed by the terminal, the dashboard, and Codex — no prompt drift.",
+  "RANK 4 — Do (A) node-pty LAST, and only for fidelity. If you do it, use @lydell/node-pty@1.2.0-beta.15 (per-platform optionalDependencies, 'never calls node-gyp') rather than node-pty@1.1.0 — it removes the entire MSVC/Spectre/GenVersion.h class of failure. Pair with @xterm/xterm@6.0.0 + @xterm/addon-fit@0.11.0. Understand what a PTY does NOT buy you: you cannot parse a drafted issue out of ANSI reliably, so you still need the RANK-1 MCP server underneath. A PTY is a viewing surface, not an integration.",
+  "DO NOT build on (C) the Agent SDK for subscription auth. It is technically the nicest API (streaming input, canUseTool, in-process createSdkMcpServer tools, hooks) and it WILL ride your CLI login — but Anthropic's own overview page tells third-party developers not to, and the SDK falls under Commercial ToS. If you later want the SDK's ergonomics, the migration is cheap: options B and C speak the same wire protocol and the same session IDs, so you can swap `pathToClaudeCodeExecutable`/transport behind your existing Harness interface (src/harness.ts) once you have an API key or an approval.",
+  "UPGRADE CLAUDE CODE BEFORE WRITING ANY stream-json STDIN CODE. You are on v2.1.158; 'Before v2.1.211, an unreadable stdin on Windows crashed the session or made it exit silently with no output.' You would spend a day debugging a fixed bug. Run `claude install latest`. Post-upgrade you also gain: --permission-prompts none (2.1.259), --forward-subagent-text (2.1.211), mcp_server_errors in system/init (2.1.219), the `capabilities` array for feature detection (2.1.205), and cross-session messaging on native Windows (2.1.234).",
+  "FIX THE SPAWN for the interactive path. src/cliStudent.ts:309 uses `{ cwd, shell: true, windowsHide: true }`. On Windows, shell:true routes stdin through a cmd.exe shim and is a known cause of 'prompt never delivered' with --input-format stream-json. Use the absolute path already resolved by src/claudeBin.ts with shell:false and stdio ['pipe','pipe','pipe']. Keep the existing shell:true batch path untouched for the current fire-and-forget student runs.",
+  "MODEL THE CODEX LEG AS A SECOND HARNESS, NOT A SECOND UI. Your src/harness.ts already has the right seam (capabilities.warmSessions / seedableSessions). Add a CodexHarness whose chat transport is `codex app-server` JSON-RPC (thread/start, turn/start, turn/steer, turn/interrupt, item/agentMessage/delta) — that is the true peer of Claude's stream-json and it even has a steering primitive Claude lacks. Use `codex exec --json` + `codex exec resume --last` only as the degraded fallback. Both harnesses emit the SAME normalized event union to the UI ({role,text}|{toolCall}|{toolResult}|{turnDone}); the dashboard should never branch on provider.",
+  "AUTHENTICATE YOUR OWN MCP SERVER even on localhost. Bind to 127.0.0.1 explicitly (not 0.0.0.0), and require a shared secret — Claude Code sends it via `headers`, Codex via `bearer_token_env_var`, Gemini via `headers`. Without this, any page in the user's browser can POST to http://127.0.0.1:4600/mcp and file GitHub issues. Also set Gemini's `trust` to false so tool calls still confirm.",
+  "MIND THE CROSS-HARNESS CONFIG KEY DRIFT when you write the installer that registers your MCP server in all three: Claude Code uses `\"type\":\"http\"` + `\"url\"`; Codex uses bare `url =` under [mcp_servers.NAME]; Gemini CLI uses `\"httpUrl\"` (plain `\"url\"` means SSE there). Claude Code will SKIP a --mcp-config entry that has a `url` with no `type` and report it in system/init.mcp_server_errors while still exiting 0 — so gate on that array, not on exit code.",
+  "FOR THE 'HAND THE DRAFT BACK TO THE DASHBOARD' STEP, prefer the MCP tool call over file-drop or --json-schema. An MCP `file_issue` call is synchronous, gives the model a structured error it can fix in-conversation ('title too long', 'missing acceptance criteria'), works identically on Codex, and leaves an auditable tool_use/tool_result pair in the stream you are already rendering. File-drop and --json-schema are Claude-only and give the model no repair loop.",
+  "OPTIONAL LATER: if you want the dashboard to nudge a session the user is running in their OWN terminal (pure option D, no spawning at all), the sanctioned local IPC is the session inbox — a named pipe on native Windows, path in CLAUDE_CODE_MESSAGING_SOCKET, first line must be {\"type\":\"auth\",\"token\":\"<CLAUDE_CODE_MESSAGING_TOKEN>\"}, requires v2.1.234+. Watch Channels too (--channels, two-way, MCP-based) — once the allowlist opens up it becomes the cleanest possible dashboard<->live-session bridge."
+ ],
+ "unknowns": [
+  "Whether the published node-pty@1.1.0 npm tarball actually contains a `prebuilds/win32-x64/` directory. scripts/prebuild.js only CHECKS for it locally (it downloads nothing) and `prebuilds/` IS in the package.json `files` array, and the @lydell fork's stated raison d'être ('ships binaries for all platforms, making it large') implies yes — but I could not extract a tarball to confirm. VERIFY LOCALLY, read-only: `npm view node-pty@1.1.0 dist.tarball`, then in the scratchpad `npm pack node-pty@1.1.0 && tar -tzf node-pty-1.1.0.tgz | grep prebuilds`. If win32-x64 is absent you will hit node-gyp + the Spectre-libs requirement.",
+  "Whether node-pty 1.1.0's shipped prebuild is a true Node-API binary (it depends on node-addon-api ^7.1.0, which implies yes) and therefore loads in Electron 33/41 WITHOUT @electron/rebuild. Community reports from 2026 still say a rebuild is needed. VERIFY: in the scratchpad, `npm i node-pty@1.1.0` then `node -e \"require('node-pty')\"` (should pass on Node 24), then `npx electron -e \"require('node-pty')\"` (the real test). If the Electron load fails, switch to @lydell/node-pty.",
+  "Whether Claude Code v2.1.158 specifically accepts a long-lived piped stdin with --input-format stream-json on native Windows. The docs flag a Windows stdin bug fixed only in v2.1.211. VERIFY after upgrading: `claude install latest`, confirm `claude --version` >= 2.1.211, then pipe two NDJSON lines and confirm two assistant turns come back (this spends a small amount of plan usage — I did not run it).",
+  "Whether --append-system-prompt-file / --system-prompt-file exist in your installed build. They appear in current docs but NOT in the v2.1.158 `claude --help` output I captured (only `--append-system-prompt <prompt>` and `--system-prompt <prompt>`). VERIFY after upgrade: `claude --help | grep -i system-prompt`.",
+  "Codex CLI is NOT installed on this machine (`codex --version` -> command not found), so every Codex claim is doc-derived and unverified against a real binary. VERIFY: install via `curl -fsSL https://chatgpt.com/codex/install.sh | sh` (or npm), then `codex --version`, `codex app-server --help`, `codex exec --help`, `codex mcp --help`. In particular confirm the exact app-server method names and whether `codex mcp-server` is already removed in the shipped version.",
+  "The exact, complete JSON-RPC schema for `codex app-server` (params shapes for thread/start and turn/start, the full item/* notification union). The docs page summarizes method names but I could not retrieve full request/response payloads. VERIFY: `codex app-server` on stdio and send an `initialize`; or read the schema in the openai/codex repo (the docs/ tree now mostly redirects to learn.chatgpt.com, so the Rust source under codex-rs/app-server-protocol is the ground truth).",
+  "Whether Anthropic's paused Agent SDK credit change has since resumed or been replaced. The support article said paused as of June 15 2026 with a promise of advance notice; today is 2026-09-13 and I found no resumption notice. VERIFY before shipping: re-read https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan and the Claude Code changelog.",
+  "Whether Codex custom prompts (~/.codex/prompts/*.md) still load in the current Codex release — they are documented as DEPRECATED in favour of Skills, and openai/codex issue #15941 reports them disappearing after upgrading to codex-cli 0.117.0. VERIFY: after installing Codex, drop a file in ~/.codex/prompts/ and check whether it appears under `/prompts:`; if not, author the planner as a Codex Skill instead.",
+  "Whether Claude Code's HTTP MCP client accepts a plain `http://127.0.0.1:4600/mcp` URL without complaint (some MCP clients force HTTPS upgrade). VERIFY: `claude mcp add --transport http plan http://127.0.0.1:4600/mcp` then `claude mcp get plan` and `/mcp` in a session; check system/init's mcp_servers[].status is 'connected', not 'pending' or absent with an mcp_server_errors entry.",
+  "Whether your Claude plan tier (Pro vs Max) is one where the planning terminal's token burn is viable. `claude -p` turns draw from the same subscription limits as interactive use today, and a long interview-style planning conversation with full CLAUDE.md context is not cheap. VERIFY: run one real planning conversation with --output-format json and read total_cost_usd from the result (a client-side estimate), or check /usage in an interactive session.",
+  "Whether the existing dashboard's node:http router (src/dashboard.ts:1107, ROUTES table keyed by `${method} ${url}`) can host an MCP streamable-HTTP transport without refactoring — the transport needs raw request/response access and SSE-style chunked responses, while the current router does `sendJson(res, await route(...))`. VERIFY by reading src/dashboard.ts:1107-1165 in full; you likely need an early `if (url.startsWith('/mcp'))` escape hatch before the ROUTES lookup."
+ ]
+}

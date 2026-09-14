@@ -1,0 +1,361 @@
+{
+ "key": "other-harnesses",
+ "summary": "Surveyed 11 coding-agent CLIs for harness-adapter suitability (Sept 2026). Two structural surprises dominate: (1) **Gemini CLI is effectively dead for consumer auth** — Google stopped serving Google AI Pro/Ultra/free-tier requests through it on 2026-06-18 and pushed users to **Antigravity CLI (`agy`)**, which is OAuth-only with **no API-key/headless auth path** (issue #78 still OPEN; maintainers say \"use the SDK for CI\"). So Google is currently the one vendor with *no* unattended-capable terminal agent. (2) **Anthropic (2026-02-19) and Google both explicitly prohibit driving a consumer subscription from a third-party tool**, while **GitHub formally blessed the opposite** (Copilot subscription → OpenCode, 2026-01-16). Amp is the only vendor that advertises BYO-subscription routing as a feature. Practically: an orchestrator riding consumer subs is legal for Claude Code (first-party, unmodified binary, ordinary individual use), Copilot CLI, Cursor (API key preferred), Codex (API key preferred for automation), Amp; and prohibited/blocked for Gemini/Antigravity and for any non-first-party client using Claude OAuth.\n\nCOMPARISON TABLE (— = absent/unverified)\n\n| CLI | Headless invoke | JSON out | Session resume/fork | Usage in output | Cache split | Tool restriction | Windows | Auth for unattended |\n|---|---|---|---|---|---|---|---|---|\n| **Antigravity `agy`** (Google, replaces Gemini CLI) | `-p/--print` | `--output-format json\\|stream-json` + `--json-schema` | `-c`, `--conversation <id>`; fork only via `/fork` TUI | `usage{input,output,thinking,cache_read,total}` per result + per `step_update` | cache_read only (no write) | `--dangerously-skip-permissions`, settings `toolPermission` | native | **OAuth only — no API key, no headless auth** |\n| **Gemini CLI** (legacy/enterprise) | `-p/--prompt` | `--output-format json\\|stream-json` | `--resume` (buggy; session_id absent from headless JSON historically) | full `SessionMetrics` per model | `tokens.cached` (no write) | `--allowed-tools`, `--yolo`, `--approval-mode` | native | `GEMINI_API_KEY` / Vertex ADC (consumer tiers cut off 2026-06-18) |\n| **Copilot CLI** | `-p`, stdin pipe, `-s` | `--output-format json` (JSONL) | `--resume=<id\\|name>`, `-r`, `--continue`, `--name` | `--usage-output-file` JSON (per-agent); `events.jsonl` | via OTel GenAI spans | `--allow-tool`/`--deny-tool` w/ `shell(git:*)`, `write(path)`, `url(...)`; `--allow-all` | native (PS ≥6) | `COPILOT_GITHUB_TOKEN`/`GH_TOKEN` PAT w/ \"Copilot Requests\"; also `--server`/JSON-RPC SDK + ACP |\n| **Cursor `agent`** | `-p/--print` | `--output-format text\\|json\\|stream-json` | `--resume <id>`, `ls` | **none** (only duration_ms/duration_api_ms) | — | `-f/--force`, `--sandbox enabled\\|disabled` | native PS installer | `CURSOR_API_KEY` / `--api-key` (docs say API key for CI) |\n| **OpenCode** | `opencode run` | `--format json` (raw events) | `--continue`, `--session <id>`, **`--fork`** | `cost` + `tokens{input,output,reasoning,cache{read,write}}` on AssistantMessage | **yes (read+write)** | `--auto`; per-message `tools` in server API | native (WSL recommended) | provider creds in `auth.json`; also `opencode serve` HTTP + SDK |\n| **Amp** | `-x/--execute`, stdin | `--stream-json`, `--stream-json-input`, `--stream-json-thinking` | `amp threads new\\|continue\\|fork\\|list` | `usage{input,output,cache_creation,cache_read,service_tier}` | **yes (create+read)** | `amp.commands.allowlist`/`strict`/`dangerouslyAllowAll` | **WSL only** | `AMP_API_KEY` (`sgamp_…`, not the `amp login` session token) |\n| **Droid (Factory)** | `droid exec`, stdin, `-f` | `-o text\\|json\\|stream-json\\|stream-jsonrpc` + `--input-format` | `-s/--session-id`, **`--fork`** | not in `-o json` envelope | — | `--restrict-tools`/`--additional-tools`/`--disabled-tools`, `--auto low\\|med\\|high` | native `droid.exe` | `FACTORY_API_KEY=fk-…` |\n| **Kimi Code CLI** | `-p/--prompt` | `--output-format text\\|stream-json` | `-S/--session [id]`, `-c/--continue`, `-r` alias | — | — | `-y/--yolo`, `--auto`, `--plan` | native (needs Git Bash; `KIMI_SHELL_PATH`) | Kimi OAuth or Moonshot API key |\n| **Mistral Vibe** | `--prompt` | `--output text\\|json\\|streaming` | `-c/--continue`, `--resume SESSION_ID` | — (`--max-price` exists) | — | `--enabled-tools` (glob/`re:`), `--agent plan\\|accept-edits\\|auto-approve` | Apache-2.0 Python CLI | `MISTRAL_API_KEY` |\n| **Aider** | `--message` / `-f --message-file` | **none** | git-commit-based only | `/tokens` in-chat only | — | `--yes-always`, `--dry-run` | native (PS installer) | any provider API key |\n| **Codex CLI** (baseline) | `codex exec` | `--json` (NDJSON), `-o/--output-last-message`, `--output-schema` | `codex exec resume <id>\\|--last\\|--all` | token_count events | yes (cached input) | `-s read-only\\|workspace-write\\|danger-full-access`, `--yolo` | native | `OPENAI_API_KEY` / `CODEX_ACCESS_TOKEN` |\n\nDerived interface: the v2 contract must split into **Provider** (credential kind + injection channel + headless-capability + quota model + quota probe + policy stance), **Harness** (process/protocol adapter: flags, event schema mapper, session capability tier, permission model, platform), and **Model** (id string + effort knob), with an explicit `resolve(provider, harness) -> allowed models` step because the three are *not* orthogonal (Copilot's model list depends on plan; `agy` accepts no key at all; Amp/OpenCode/Droid accept BYOK; Cursor model list is plan-gated).",
+ "findings": [
+  {
+   "claim": "Google announced 2026-05-19 that Gemini CLI transitions to Antigravity CLI; on 2026-06-18 Gemini CLI and Gemini Code Assist IDE extensions stopped serving requests for Google AI Pro, Ultra, and free-tier users. Enterprise (Code Assist Standard/Enterprise, Google Cloud) access is unchanged, and Gemini CLI remains accessible via paid Gemini / Gemini Enterprise Agent Platform API keys. The repo stays Apache-2.0 and is still shipping nightlies (v0.61.0-nightly.20260913 pushed 2026-09-13).",
+   "source_url": "https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-05-19"
+  },
+  {
+   "claim": "gemini-cli GitHub repo is NOT archived and is still actively pushed (pushed_at 2026-09-13T01:29:26Z, 106,966 stars), so the harness binary still exists — only consumer auth was cut.",
+   "source_url": "https://github.com/google-gemini/gemini-cli",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Antigravity CLI (`agy`) has NO API-key or service-account auth path. Issue #78 'Support Gemini API Key (Google AI Studio) Authentication for Headless Environments' is still OPEN (filed 2026-05-21). A Google maintainer (rodydavis) states: 'Gemini API Key is not supported currently... For using an API key in Antigravity you can use the SDK. The SDK should fit a lot of the use cases that you need for CI workflows.' A commenter confirms on agy 1.0.12 that GEMINI_API_KEY/ANTIGRAVITY_API_KEY/GOOGLE_API_KEY are all ignored in a clean $HOME, and that ADC + project id is also not a headless auth method today.",
+   "source_url": "https://github.com/google-antigravity/antigravity-cli/issues/78",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Antigravity CLI headless contract: binary `agy`; flags `-p/--print/--prompt`, `--output-format text|json|stream-json`, `--input-format text|stream-json`, `--json-schema`, `--model`, `--effort low|medium|high`, `--agent`, `-c/--continue`, `--conversation <id>`, `--dangerously-skip-permissions`, `--print-timeout` (default 5m), `--sandbox`. JSON envelope: {conversation_id, status: SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID|WAITING|RUNNING, response, error, duration_seconds, num_turns, structured_output, json_schema, usage:{input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens}}. stream-json events: init | step_update | result. Exit codes 0 success, 1 general/auth-required/invalid input, 2 unsupported message type. stdin event shape: {\"event\":\"user\",\"message\":{\"content\":...}}; only `text` blocks supported. `--input-format stream-json` requires `--output-format stream-json`.",
+   "source_url": "https://antigravity.google/docs/cli/headless/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "In agy headless mode a tool requiring approval it cannot obtain is SOFT-DENIED: the run continues, exits 0, and prints a notice to stderr. This means exit code 0 does not imply the task was completed — an orchestrator must parse stderr or check `status`.",
+   "source_url": "https://antigravity.google/docs/cli/headless/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Gemini CLI JSON output type (source of truth): `JsonOutput { session_id?: string; response?: string; stats?: SessionMetrics; error?: {type,message,code?}; warnings?: string[] }`. OutputFormat enum = TEXT|JSON|STREAM_JSON. Stream events: init|message|tool_use|tool_result|error|result. `StreamStats { total_tokens, input_tokens, output_tokens, cached, input, duration_ms, tool_calls, models: Record<string, {total_tokens,input_tokens,output_tokens,cached,input}> }`.",
+   "source_url": "https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/output/types.ts",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Gemini CLI `stats` is `SessionMetrics`: { models: Record<modelId, { api:{totalRequests,totalErrors,totalLatencyMs,errorsByType?}, tokens:{input,prompt,candidates,total,cached,thoughts,tool}, roles:Partial<Record<LlmRole,RoleMetrics>> }>, tools:{totalCalls,totalSuccess,totalFail,totalDurationMs,totalDecisions{accept,reject,modify,auto_accept},byName:Record<string,ToolCallStats>}, files:{totalLinesAdded,totalLinesRemoved} }. Note: `cached` read tokens only, no cache-WRITE counter, and `thoughts` is a separate reasoning-token field.",
+   "source_url": "https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/telemetry/uiTelemetry.ts",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Gemini CLI headless exit codes: 0 success, 1 general error/API failure, 42 input error, 53 turn limit exceeded. (Qwen Code fork adds 55 for FatalBudgetExceededError.)",
+   "source_url": "https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/headless.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Gemini CLI tool-restriction and approval flags: `--allowed-tools <tool1,tool2,...>` (bypass confirmation dialog), `--yolo`, `--approval-mode default|auto_edit|yolo`, `--sandbox/-s`, `--sandbox-image`, `--include-directories` (max 5), `--checkpointing`, `--extensions/-e`, full `--telemetry-*` OTLP set, `--proxy`. Env: GEMINI_API_KEY, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT/LOCATION, GEMINI_MODEL, GEMINI_SANDBOX, CODE_ASSIST_ENDPOINT.",
+   "source_url": "https://google-gemini.github.io/gemini-cli/docs/get-started/configuration.html",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Gemini CLI `--resume` is unreliable: multiple open issues report 'Invalid session identifier' when resuming with a CLI-provided ID (#24808), logs.json recording an ephemeral process-level session ID rather than the resumed one (#22604), and headless JSON originally not emitting session_id at all (#14435).",
+   "source_url": "https://github.com/google-gemini/gemini-cli/issues/24808",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Anthropic policy (updated 2026-02-19): 'OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications.' 'Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not collect, store, or intermediate Claude.ai credentials or session tokens.' Also: 'Advertised usage limits for Pro and Max plans assume ordinary, individual usage of Claude Code and the Agent SDK.' Anthropic 'reserves the right to take measures to enforce these restrictions... without prior notice.'",
+   "source_url": "https://code.claude.com/docs/en/legal-and-compliance",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Anthropic carve-out that matters for a local orchestrator: the policy 'does not prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription', and preinstalling/running Claude Code in a product requires the binary be unmodified and that you 'may not pay for, resell, or intermediate Claude usage on their end users' behalf'. A single-user local orchestrator shelling out to an unmodified `claude` binary the user logged into themselves fits this carve-out; a hosted multi-tenant orchestrator does not.",
+   "source_url": "https://code.claude.com/docs/en/legal-and-compliance",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Google Gemini CLI ToS page states: 'Directly accessing the services powering Gemini CLI using third-party software, tools, or services is a violation of applicable terms and policies. Such actions may be grounds for suspension or termination of your account.' Terms differ per auth tier (Google ToS + Code Assist for individuals Privacy Notice; Google One Additional Terms for AI Pro/Ultra; GCP ToS for Standard/Enterprise; Gemini API ToS Unpaid/Paid for API keys).",
+   "source_url": "https://geminicli.com/docs/resources/tos-privacy/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "GitHub explicitly sanctioned third-party-harness use of a Copilot consumer subscription: 'All developers with paid GitHub Copilot subscriptions (Pro, Pro+, Business, or Enterprise) can now authenticate into OpenCode' via GitHub device login flow, with 'no additional AI license needed'. This is the clearest vendor permission for subscription-credential reuse in another harness.",
+   "source_url": "https://github.blog/changelog/2026-01-16-github-copilot-now-supports-opencode/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-01-16"
+  },
+  {
+   "claim": "Countervailing GitHub signal: GitHub's abuse-detection has suspended Copilot accounts for activity flagged as 'use of Copilot via scripted interactions', 'an otherwise deliberately unusual or strenuous nature', or 'use of multiple accounts to circumvent usage limits'. Orchestrated volume on a Copilot seat is a real suspension risk even where the integration itself is blessed.",
+   "source_url": "https://github.com/orgs/community/discussions/160013",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Copilot CLI DOES have JSON output as of v0.0.422-era changelog: 'Add --output-format json flag to emit JSONL in prompt mode for programmatic integrations'. Issue github/copilot-cli#52 (requesting stream-json parity with Claude Code / Codex `--json`) is CLOSED with maintainer jmoseley: 'This will be out with the next release.'",
+   "source_url": "https://github.com/github/copilot-cli/issues/52",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Copilot CLI usage telemetry: '--usage-output-file JSON output' exists and now carries per-agent usage metrics; 'Session usage metrics (requests, tokens, code changes) are now persisted to events.jsonl after each session ends'; OTel GenAI spans emit gen_ai.usage.cache_read.input_tokens, gen_ai.usage.cache_creation.input_tokens, gen_ai.usage.reasoning.output_tokens. Quota surfaces exist interactively (/usage quota progress bars for session and weekly limits; quota footer as rounded percentage; warnings at 50%/75%/90%/95%).",
+   "source_url": "https://github.com/github/copilot-cli/blob/main/changelog.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Copilot CLI session model is the richest of the GitHub-native options: `--resume=<id>` and `-r` shorthand, `--continue`, named sessions via `--name` + `--resume=<name>`, `--continue`/`--resume` select the most recent session for the current repository, `--resume` and `--continue` are mutually exclusive, empty `--resume=` is rejected, sessions resume in their saved working directory (override with `-C <dir>`), and relative `--attachment`/`--log-dir` resolve from the saved cwd.",
+   "source_url": "https://github.com/github/copilot-cli/blob/main/changelog.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Copilot CLI tool restriction grammar is the most expressive surveyed: `--allow-tool=TOOL` / `--deny-tool=TOOL` with comma-separated entries and scoped patterns — `shell(git:*)`, `shell(git show --stat)`, `write(.github/copilot-instructions.md)`, `url(https://docs.github.com/copilot/*)` — plus `--allow-all` (alias `--yolo`), `--allow-all-paths`, `--allow-all-tools`, `--allow-all-urls`. Env precedence for auth: COPILOT_GITHUB_TOKEN > GH_TOKEN > GITHUB_TOKEN. Other env: COPILOT_ALLOW_ALL, COPILOT_MODEL, COPILOT_HOME. Settings at ~/.copilot/settings.json.",
+   "source_url": "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Copilot CLI supports Linux, macOS and Windows natively (Windows requires PowerShell v6+), installs via gh.io/copilot-install script, Homebrew cask `copilot-cli`, `winget install GitHub.Copilot`, or `npm install -g @github/copilot` (Node 22+). Requires an active Copilot subscription; org/enterprise admins can disable CLI entirely. PAT auth: fine-grained PAT with 'Copilot Requests' permission in GH_TOKEN/GITHUB_TOKEN. `copilot login --with-token` reads a token from stdin (added recently) — this is the clean unattended-provisioning path.",
+   "source_url": "https://github.com/github/copilot-cli/blob/main/README.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Copilot CLI also exposes two non-CLI protocols an orchestrator could target instead of argv: `--server` / `--headless` mode speaking JSON-RPC (consumed by @github/copilot-sdk, which runs the CLI in server mode), and full ACP (Agent Client Protocol) support including closeSession, subagent IDs, raw event subscriptions, and 'token usage in ACP prompt results and live usage_update notifications'. ACP is the only surveyed protocol with *push* usage updates mid-turn.",
+   "source_url": "https://github.com/github/copilot-cli/blob/main/changelog.md",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Cursor CLI: binary is `agent` (also distributed as `cursor-agent`). Flags: `-p/--print`, `--output-format text|json|stream-json`, `--stream-partial-output`, `--model`, `-f/--force` (alias `--yolo`), `--resume <id>`, `--api-key`, `--sandbox enabled|disabled`. Subcommands: ls, login, logout, status, update, mcp. Install: `curl https://cursor.com/install -fsS | bash` (macOS/Linux/WSL) or `irm 'https://cursor.com/install?win32=true' | iex` (native Windows PowerShell).",
+   "source_url": "https://cursor.com/docs/cli/reference/parameters",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Cursor CLI JSON event shapes carry NO token usage. Result event fields are exactly {type, subtype, is_error, duration_ms, duration_api_ms, result, session_id, request_id}. System init: {type, subtype, apiKeySource, cwd, session_id, model, permissionMode}. Assistant events optionally add timestamp_ms and model_call_id under --stream-partial-output. session_id appears on every event. Quota/cost must therefore be tracked out-of-band (dashboard/API), not from the harness stream.",
+   "source_url": "https://cursor.com/docs/cli/reference/output-format",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Cursor auth: browser login (`agent login`, `NO_OPEN_BROWSER=1` prints the URL) vs API key. Docs state API key auth is the method 'for automation, scripts, or CI environments' via CURSOR_API_KEY or --api-key; credentials from login are 'securely stored locally'. Enterprise service accounts exist as non-human accounts that 'consume APIs and authenticate the CLI'. Cursor ToS has no explicit anti-automation clause; restrictions found are no rent/lease/lend/sell of the Service and no using it to train a competing model.",
+   "source_url": "https://cursor.com/docs/cli/reference/authentication",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenCode `run` flags (source-verified in packages/opencode/src/cli/cmd/run.ts): --continue/-c, --session/-s <id>, --fork (requires --continue or --session; errors otherwise), --share, --model/-m provider/model, --agent, --file/-f, --format default|json ('raw JSON events'), --title, --attach <server url>, --username/-u, --password/-p, --dir, --port, --variant, --thinking, --auto, --command. `--format json` is incompatible with interactive/--mini.",
+   "source_url": "https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/cli/cmd/run.ts",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenCode has the best-shaped usage object of any surveyed harness: AssistantMessage = { id, sessionID, role, time{created,completed?}, error?, parentID, modelID, providerID, mode, path{cwd,root}, summary?, cost: number, tokens:{ input, output, reasoning, cache:{ read, write } } }. It is the only one carrying BOTH cache read and cache write plus a precomputed cost, per message.",
+   "source_url": "https://github.com/anomalyco/opencode/blob/dev/packages/sdk/js/src/gen/types.gen.ts",
+   "confidence": "verified-source-code",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenCode also offers a non-argv path: `opencode serve --port --hostname --cors --mdns` starts a headless HTTP server (default port 4096) publishing an OpenAPI 3.1 spec at /doc, with POST /session, POST /session/:id/message (sync), POST /session/:id/prompt_async, GET /event (SSE, first event server.connected). Auth via OPENCODE_SERVER_PASSWORD (+ OPENCODE_SERVER_USERNAME, default 'opencode'). Official SDK @opencode-ai/sdk with session.create/prompt/revert/unrevert.",
+   "source_url": "https://opencode.ai/docs/server/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenCode credentials live in ~/.local/share/opencode/auth.json. Anthropic provider offers a 'Claude Pro/Max' browser OAuth option, but the docs themselves warn: 'There are plugins that allow you to use your Claude Pro/Max models with OpenCode. Anthropic explicitly prohibits this. Previous versions of OpenCode came bundled with these plugins but that is no longer the case as of 1.3.0.' OpenAI offers 'ChatGPT Plus/Pro' browser auth or manual API key; GitHub Copilot uses device code flow.",
+   "source_url": "https://opencode.ai/docs/providers/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenCode Windows: native installs via choco/scoop/npm/mise/docker are documented, but WSL is 'recommended' and Bun-based Windows install is still 'in progress'. Treat Windows as supported-with-caveats.",
+   "source_url": "https://opencode.ai/docs/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Amp execute mode: `-x`/`--execute` (auto-activates when stdout is redirected, e.g. `echo \"q\" | amp > out.txt`), `--stream-json`, `--stream-json-input` (reads stdin until close), `--stream-json-thinking`, `--fast`, `-ox` (run in a server-side orb), `--mcp-config`, `--plugin-ready-timeout`, `--executor local|orb|runner:name`, `amp --no-tui --runner-id <id>`. Stdin piping supported alone or combined with a -x prompt.",
+   "source_url": "https://ampcode.com/docs/cli/execute-mode",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Amp streaming JSON is Claude-Code-shaped: message types system(init) / user / assistant / result; every message carries session_id formatted 'T-<uuid>'; usage object = {input_tokens, output_tokens, cache_creation_input_tokens?, cache_read_input_tokens?, max_tokens?, service_tier?} on assistant and result messages. Amp SDK ResultMessage/ErrorResultMessage also expose `permission_denials`, and `enabled_tools` (maps to amp.tools.enable) for tool restriction; continue_thread accepts True (most recent) or a thread id string.",
+   "source_url": "https://ampcode.com/docs/cli/streaming-json",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Amp auth/quota: `export AMP_API_KEY=<token>` for non-interactive environments, and the docs explicitly say to use access tokens starting with `sgamp_` from Settings, NOT session tokens from `amp login`. `amp usage` prints the credit balance. Other env: AMP_SETTINGS_FILE, AMP_LOG_LEVEL. Thread commands: amp threads new|continue [id]|fork [id]|list|share|compact. Security settings: amp.commands.allowlist, amp.commands.strict, amp.dangerouslyAllowAll.",
+   "source_url": "https://github.com/sourcegraph/amp-examples-and-guides/blob/main/guides/cli/README.md",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Amp is the only vendor that markets BYO-subscription routing: pricing page advertises 'Bring your own keys (BYOK)', 'Use tokens from anywhere', 'Use your ChatGPT sub & other subs', a free Hobby tier, zero markup on provider API pricing for individuals, $5 minimum credit purchase, credits expiring 12 months after purchase. Enterprise workspaces can optionally 'prevent workspace members from using personal model routing'. Amp CLI supports 'macOS, Linux, and Windows through WSL' — no native Windows build.",
+   "source_url": "https://ampcode.com/docs/pricing",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Factory Droid is the most orchestrator-friendly newcomer. `droid exec` supports `-o, --output-format text|json|stream-json|stream-jsonrpc` plus `--input-format stream-json|stream-jsonrpc` — i.e. bidirectional JSON-RPC over stdio, the only surveyed CLI with a request/response correlation protocol built in. Session: `-s/--session-id <id>` (continue) and `--fork <id>`. Tools: --restrict-tools / --additional-tools / --disabled-tools / --disable-builtin-skills. Autonomy: `--auto low|medium|high`, `--skip-permissions-unsafe`. Also -w/--worktree, --cwd, --tag, --log-group-id, --append-system-prompt[-file], --mission with --worker-model/--validator-model. Auth: FACTORY_API_KEY=fk-…. Native Windows binary droid.exe.",
+   "source_url": "https://docs.factory.ai/droid-exec/overview",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Droid's `-o json` envelope is {type, subtype, is_error, duration_ms, num_turns, result, session_id} — no token usage. Cost/usage is only reachable interactively via /cost and /stats [period] slash commands. Disable auto-update with FACTORY_DROID_AUTO_UPDATE_ENABLED=false (important: an orchestrator must pin harness versions).",
+   "source_url": "https://docs.factory.ai/reference/cli-reference",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Kimi Code CLI (MoonshotAI, TypeScript, MIT, single binary, replacing the older kimi-cli): `-p/--prompt` runs one prompt non-interactively; `--output-format text|stream-json` (requires --prompt); `-S/--session [id]` resumes (interactive selector without id), `-c/--continue` continues most recent session in cwd, `-r/--resume` is a hidden alias of --session; `-y/--yolo` (aliases --yes, --auto-approve), `--auto`, `--plan`; `-m/--model`, `--agent`, `--agent-file`, `--add-dir`, `--skills-dir`. Resuming can override saved permission mode with --auto/--yolo/--plan. In stream-json mode thinking content is NOT emitted to JSONL and 'resuming session' notices go to stderr.",
+   "source_url": "https://moonshotai.github.io/kimi-code/en/reference/kimi-command.html",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Kimi Code CLI auth is 'Kimi Code OAuth' or a Moonshot AI Open Platform API key via in-CLI /login. Windows: install via `irm https://code.kimi.com/kimi-code/install.ps1 | iex`, but Git for Windows must be installed first because the CLI uses bundled Git Bash as its shell; override with KIMI_SHELL_PATH pointing at bash.exe. Default model Kimi K2.5, 1M context (as of 2026-09-07).",
+   "source_url": "https://github.com/MoonshotAI/kimi-code",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Mistral Vibe exists and is real: mistralai/mistral-vibe, Apache-2.0 Python CLI, Vibe 2.0 GA end of January 2026, powered by Devstral 2, bundled with Le Chat plans. Programmatic mode: `vibe --prompt \"...\" --max-turns 5 --output json` with --output text|json|streaming; --enabled-tools TOOL (exact names, glob like bash*, or regex with re: prefix); --agent plan|accept-edits|auto-approve; --max-price DOLLARS (docs note it is unreliable); --trust; -c/--continue; --resume SESSION_ID. Programmatic mode 'does not start the chat interface and disables interactive tools such as the question prompt'.",
+   "source_url": "https://docs.mistral.ai/vibe/code/cli/work-with-cli",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Mistral Vibe auth: browser sign-in with a Mistral account by default (credentials cached locally), or MISTRAL_API_KEY in the environment; a first-launch setup wizard registers the key. The same key works in Free mode, on a paid plan, or with pay-as-you-go — i.e. no separate subscription-vs-API-key credential split, which makes it trivially headless-safe.",
+   "source_url": "https://docs.mistral.ai/vibe/code/cli/api-keys-profiles",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Aider is in maintenance mode and is the weakest harness candidate: latest PyPI release v0.86.2 (2026-02-12), no JSON output mode at all, scripting is `aider --message \"...\"` / `-f/--message-file FILE` / `--yes-always` / `--dry-run` / `--auto-commits`, and the Python API (Coder.create(main_model=..., fnames=...).run(...)) is explicitly 'not officially supported or documented, and could change in future releases without providing backwards compatibility'. Session continuity is git-commit-based, not session-id-based. Windows is supported (install.ps1); Python 3.9-3.13.",
+   "source_url": "https://aider.chat/docs/scripting.html",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Codex CLI baseline for interface comparison: `codex exec` with `--json`/`--experimental-json` (NDJSON events), `-o/--output-last-message <path>`, `--output-schema <path>` (JSON Schema), `codex exec resume [SESSION_ID] | --last | --all`, `-s/--sandbox read-only|workspace-write|danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`/`--yolo`, `--full-auto` (deprecated), `-m/--model`, `-c/--config key=value` (repeatable), `--profile`. Auth: ChatGPT OAuth (Plus/Pro), OPENAI_API_KEY, or CODEX_ACCESS_TOKEN.",
+   "source_url": "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "OpenAI's practical guidance (widely reported, not a hard ToS clause found): ChatGPT sign-in draws on the plan's shared 5-hour-window limits across CLI/web/IDE, while 'automation, CI/CD, scripted runs should use API keys'. On 2026-07-12 OpenAI temporarily removed the 5-hour restriction for Plus/Business/Pro with no published end date; weekly limits remain.",
+   "source_url": "https://inventivehq.com/blog/codex-subscription-options-guide",
+   "confidence": "community-report",
+   "date_of_source": "2026-09-13"
+  },
+  {
+   "claim": "Qwen Code is a gemini-cli fork and inherits its headless surface plus extras: `qwen -p \"...\" --output-format stream-json`, `--output-format/-o`, `--system-prompt`, `--append-system-prompt`, `--output-style`, `--yolo/-y`, `--approval-mode`, `--max-session-turns`, `--max-wall-time`, `--max-tool-calls`, and a `--json-schema` structured-output mode. Its stream shape is Claude-Code-like (type: system/assistant/result, session_id, usage, parent_tool_use_id). Exit code 55 = FatalBudgetExceededError, 53 = turn cap. Apache-2.0, works with any OpenAI-completions-compatible model.",
+   "source_url": "https://qwenlm.github.io/qwen-code-docs/en/users/features/headless/",
+   "confidence": "verified-official-doc",
+   "date_of_source": "2026-09-13"
+  }
+ ],
+ "exact_commands_or_apis": [
+  "agy -p \"<prompt>\" --output-format json --model <slug> --effort low|medium|high --dangerously-skip-permissions --print-timeout 5m",
+  "agy -p \"<prompt>\" --output-format stream-json --input-format stream-json   # stdin: {\"event\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"...\"}]}}",
+  "agy --continue | agy --conversation <conversation_id>",
+  "agy JSON envelope: {conversation_id,status,response,error,duration_seconds,num_turns,structured_output,json_schema,usage:{input_tokens,output_tokens,thinking_tokens,cache_read_tokens,total_tokens}}",
+  "agy stream events: init | step_update{conversation_id,step_index,state,step_type,tool_name,text_delta,duration_seconds,usage,tool_info,subagent_info} | result; exit 0/1/2",
+  "gemini -p \"<prompt>\" --output-format json --allowed-tools ReadFile,Shell --approval-mode yolo --include-directories a,b",
+  "gemini --output-format stream-json ; events: init|message|tool_use|tool_result|error|result",
+  "gemini JsonOutput: {session_id?,response?,stats?:SessionMetrics,error?:{type,message,code?},warnings?:string[]}; exit 0/1/42/53",
+  "gemini SessionMetrics.models[<id>].tokens = {input,prompt,candidates,total,cached,thoughts,tool}",
+  "gemini StreamStats = {total_tokens,input_tokens,output_tokens,cached,input,duration_ms,tool_calls,models}",
+  "copilot -p \"<prompt>\" -s --no-ask-user --output-format json --model gpt-5.4 --allow-tool 'shell(git:*)' --deny-tool 'write(/etc/*)'",
+  "copilot -p \"...\" --resume=<id|name> | -r <id> | --continue | --name <session-name> -C <dir> --add-dir <dir> --worktree",
+  "copilot -p \"...\" --usage-output-file <path.json>   # per-agent usage metrics; also ~/.copilot events.jsonl after session end",
+  "copilot --allow-all | --yolo | --allow-all-tools | --allow-all-paths | --allow-all-urls ; --attachment <file> ; --share=PATH ; --share-gist ; --log-dir ; --print-debug-info",
+  "copilot login --with-token   # reads token from stdin ; --web-flow | --device-code",
+  "copilot --server / --headless   # JSON-RPC; consumed by npm @github/copilot-sdk ; also ACP mode with usage_update notifications",
+  "env: COPILOT_GITHUB_TOKEN > GH_TOKEN > GITHUB_TOKEN ; COPILOT_MODEL ; COPILOT_ALLOW_ALL ; COPILOT_HOME ; COPILOT_CLI=1 (set in subprocesses)",
+  "npm install -g @github/copilot  |  winget install GitHub.Copilot  |  brew install copilot-cli  |  curl -fsSL https://gh.io/copilot-install | bash",
+  "~/.copilot/settings.json ; repo-level .github/copilot/settings.json ; .mcp.json ; also reads .claude/settings.json",
+  "agent -p \"<prompt>\" --output-format json|stream-json --model <m> --force --resume <chat-id> --sandbox enabled|disabled --stream-partial-output",
+  "agent login | logout | status | ls | update | mcp ; CURSOR_API_KEY=... ; --api-key <key> ; NO_OPEN_BROWSER=1",
+  "cursor install: curl https://cursor.com/install -fsS | bash   (macOS/Linux/WSL);  irm 'https://cursor.com/install?win32=true' | iex   (Windows)",
+  "cursor result event: {type,subtype,duration_ms,duration_api_ms,is_error,result,session_id,request_id}  # NO token usage",
+  "opencode run \"<prompt>\" --format json --continue|-c --session|-s <id> --fork --model provider/model --agent <a> --file <f> --title <t> --auto --attach http://localhost:4096 --dir <d> --variant <v>",
+  "opencode serve --port 4096 --hostname 0.0.0.0 --cors <origin> --mdns   # OpenAPI 3.1 at /doc",
+  "POST /session ; POST /session/:id/message ; POST /session/:id/prompt_async ; GET /event (SSE) ; GET /provider ; OPENCODE_SERVER_PASSWORD / OPENCODE_SERVER_USERNAME",
+  "opencode AssistantMessage: {cost:number, tokens:{input,output,reasoning,cache:{read,write}}, modelID, providerID, sessionID, path:{cwd,root}}",
+  "opencode auth login --provider <p> --method <m> ; opencode auth list ; opencode models --refresh ; creds at ~/.local/share/opencode/auth.json",
+  "amp -x \"<prompt>\" --stream-json  |  echo \"<prompt>\" | amp -x  |  cat file | amp -x \"question\"",
+  "amp -x \"...\" --stream-json-input --stream-json-thinking --fast --mcp-config <json> --plugin-ready-timeout <secs> --executor local|orb|runner:NAME",
+  "amp threads new | continue [threadId] | fork [threadId] | list | share [id] | compact [id] ; amp usage ; amp login/logout ; amp --no-tui --runner-id <id>",
+  "export AMP_API_KEY=sgamp_...   # access token from Settings, NOT the amp login session token ; AMP_SETTINGS_FILE ; AMP_LOG_LEVEL",
+  "amp settings.json: amp.commands.allowlist, amp.commands.strict, amp.dangerouslyAllowAll, amp.tools.enable",
+  "amp usage object: {input_tokens,output_tokens,cache_creation_input_tokens?,cache_read_input_tokens?,max_tokens?,service_tier?} ; session_id format 'T-<uuid>'",
+  "droid exec \"<prompt>\" -o json|stream-json|stream-jsonrpc --input-format stream-json|stream-jsonrpc -s <session-id> --fork <id> --auto low|medium|high -m <model> -r <effort> --cwd <path> -w [name]",
+  "droid exec --restrict-tools <ids> --additional-tools <ids> --disabled-tools <ids> --disable-builtin-skills --skip-permissions-unsafe --tag <spec> --log-group-id <id> --append-system-prompt[-file] -f prompt.md --mission",
+  "export FACTORY_API_KEY=fk-... ; export FACTORY_DROID_AUTO_UPDATE_ENABLED=false ; droid.exe on Windows",
+  "droid json envelope: {type,subtype,is_error,duration_ms,num_turns,result,session_id}",
+  "kimi -p \"<prompt>\" --output-format text|stream-json -S/--session [id] -c/--continue -m <model> -y/--yolo --auto --plan --agent <n> --agent-file <p> --add-dir <d> --skills-dir <d>",
+  "kimi install (Windows): irm https://code.kimi.com/kimi-code/install.ps1 | iex ; requires Git for Windows; KIMI_SHELL_PATH=<abs path to bash.exe>",
+  "vibe --prompt \"<prompt>\" --output text|json|streaming --max-turns N --enabled-tools 'bash*' --enabled-tools 're:^read' --agent plan|accept-edits|auto-approve --max-price <usd> --trust -c|--continue --resume <SESSION_ID> ; MISTRAL_API_KEY",
+  "aider --message \"<prompt>\" --yes-always --no-auto-commits --dry-run  |  aider -f/--message-file msg.txt   # AIDER_MESSAGE_FILE, AIDER_YES_ALWAYS ; no JSON output",
+  "codex exec \"<prompt>\" --json -o last.txt --output-schema schema.json -s workspace-write -m <model> -c key=value --profile <p>",
+  "codex exec resume <SESSION_ID> | --last | --all ; codex login ; OPENAI_API_KEY | CODEX_ACCESS_TOKEN",
+  "qwen -p \"<prompt>\" --output-format stream-json --approval-mode yolo --max-session-turns N --max-wall-time <d> --max-tool-calls N --json-schema <file>   # exit 53 turn cap, 55 budget exceeded"
+ ],
+ "policy_notes": [
+  "ANTHROPIC — PROHIBITED for third-party harnesses: 'OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications.' 'Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users... developers may not collect, store, or intermediate Claude.ai credentials or session tokens.' (code.claude.com/docs/en/legal-and-compliance; doc updated 2026-02-19, server-side enforcement from March 2026.)",
+  "ANTHROPIC — the carve-out an orchestrator can live in: policy 'does not prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription.' So: shell out to the stock `claude` binary the user logged into themselves = fine. Extract/reuse the OAuth token, re-implement the client, or intermediate credentials for other users = violation. Also 'The Claude Code binary must not be modified' and 'Customers may not pay for, resell, or intermediate Claude usage on their end users' behalf.'",
+  "ANTHROPIC — volume caveat: 'Advertised usage limits for Pro and Max plans assume ordinary, individual usage of Claude Code and the Agent SDK.' An always-on orchestrator burning a Max plan 24/7 is outside the stated assumption even though the auth path is legitimate. Anthropic 'reserves the right to take measures to enforce these restrictions and may do so without prior notice.'",
+  "GOOGLE — PROHIBITED and now technically enforced: 'Directly accessing the services powering Gemini CLI using third-party software, tools, or services is a violation of applicable terms and policies. Such actions may be grounds for suspension or termination of your account.' Separately, consumer tiers (free Code Assist for individuals, Google AI Pro, Google AI Ultra) stopped being served through Gemini CLI on 2026-06-18. The successor `agy` is OAuth-only with no key-based headless path, so there is currently NO compliant unattended Google option short of Code Assist Standard/Enterprise, paid Gemini API keys with the legacy gemini-cli binary, or the Antigravity SDK.",
+  "GITHUB — EXPLICITLY PERMITTED (the outlier): 'All developers with paid GitHub Copilot subscriptions (Pro, Pro+, Business, or Enterprise) can now authenticate into OpenCode' via device login, 'no additional AI license needed' (github.blog changelog 2026-01-16). This is a formal vendor partnership, i.e. subscription credentials driving a third-party harness is sanctioned.",
+  "GITHUB — countervailing risk: Copilot abuse-detection has suspended accounts citing 'use of Copilot via scripted interactions', activity of 'an otherwise deliberately unusual or strenuous nature', and 'use of multiple accounts to circumvent usage limits'. GitHub Acceptable Use also prohibits 'excessive automated bulk activity'. Blessed integration != unlimited orchestrated volume. Enterprise/org admins can also disable Copilot CLI entirely via policy.",
+  "GITHUB — clean automation credential exists: fine-grained PAT with the 'Copilot Requests' permission, supplied via COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN, and `copilot login --with-token` reading from stdin. Docs recommend COPILOT_GITHUB_TOKEN for GitHub Actions. This is a first-class unattended path, not a workaround.",
+  "CURSOR — API key is the sanctioned automation path: docs say to use API key auth 'for automation, scripts, or CI environments' (CURSOR_API_KEY / --api-key), with browser login 'recommended' only for interactive use. Enterprise service accounts exist explicitly as 'non-human accounts that enable teams to securely automate Cursor-powered workflows at scale'. Cursor ToS contains no explicit anti-automation clause; the relevant prohibitions are 'rent, lease, lend, or sell the Service' and no use to 'develop or train a model that is competitive with the Service'. Verdict: gray-but-permitted with an API key; avoid scraping/reusing the browser-login credential.",
+  "OPENAI — no hard ToS clause found, but consistent vendor guidance: ChatGPT sign-in shares the plan's 5-hour-window limits across CLI/web/IDE and is positioned for interactive coding; API keys are positioned for 'automation, CI/CD, scripted runs'. Treat ChatGPT-plan Codex as interactive-only for compliance-sensitive deployments; use OPENAI_API_KEY for orchestrated runs. (Community/secondary sources only — verify against OpenAI's current usage policies.)",
+  "AMP (Sourcegraph) — the most permissive: pricing page advertises BYOK, 'Use tokens from anywhere', and 'Use your ChatGPT sub & other subs'. No markup on provider API pricing for individuals. Personal model routing is allowed by default and is only restrictable by *enterprise workspace admins*, which implies it is a supported feature rather than tolerated abuse. Amp itself requires an `sgamp_` access token (not the login session token) for non-interactive use — the docs distinguishing these two is itself a signal that headless use is a first-class supported mode.",
+  "MISTRAL — no subscription/API-key split to violate: the same Mistral API key works in Free mode, on a paid plan, or with pay-as-you-go, and MISTRAL_API_KEY is a documented env var. Vibe CLI is Apache-2.0. Lowest policy risk of the hosted options.",
+  "FACTORY / MOONSHOT / OPENCODE-as-software — Factory uses a dedicated FACTORY_API_KEY (fk-…) designed for CI; Kimi Code offers a Moonshot Open Platform API key alongside OAuth; OpenCode itself is BYO-provider-credential software and carries no vendor quota of its own — its policy exposure is entirely inherited from whichever provider credential you load into ~/.local/share/opencode/auth.json (notably: loading Anthropic Pro/Max OAuth there is what Anthropic prohibits, and OpenCode's own docs say so).",
+  "GENERAL RULE the interface should encode: mark each Provider with a tri-state `automationStance` = {sanctioned, gray, prohibited} and refuse to construct a (Provider, Harness) pair whose stance is `prohibited` — specifically block {Anthropic-consumer-OAuth} × {any harness != claude} and {Google-consumer-OAuth} × {any harness}. This is a correctness constraint, not a warning, because both vendors enforce server-side and suspend accounts."
+ ],
+ "recommendations": [
+  "Split the v2 contract into three orthogonal records and one non-orthogonal resolver. PROVIDER = {id, credentialKind: api_key|oauth_subscription|oauth_device|pat|adc_service_account|none_byo, injection: {envVars[], flag?, credFilePath?, requiresPriorInteractiveLogin: bool}, headlessCapable: bool, automationStance: sanctioned|gray|prohibited, quotaModel: requests_per_day|rolling_window|weekly|credits_usd|premium_requests|token_metered, quotaProbe?: {kind: cli|http|none, command|endpoint}, rateLimitSignal: {exitCodes[], stderrPatterns[], jsonErrorCodes[]}}. HARNESS = {id, binary, platform, invoke, protocol, sessions, permissions, usage, budget, exit}. MODEL = {id, harnessFlag, effortFlag?, variantFlag?}. Then `resolve(provider, harness) -> {allowedModels, warnings}` — never a cartesian product, because Copilot's model list is plan-gated, `agy` accepts no key at all, and Cursor gates models by plan.",
+  "Make `headlessCapable` a hard gate on Provider, not a footnote. Antigravity is the proof case: the harness has a beautiful headless JSON surface and the provider still cannot authenticate in a fresh container. Model it as Provider.headlessCapable=false so the orchestrator refuses to schedule the harness in an unattended worker even though every Harness capability flag says yes.",
+  "Define a SessionCapability tier enum rather than booleans: NONE (aider) < RESUME_LAST (--continue only) < RESUME_BY_ID (copilot, cursor, kimi, vibe, codex, agy) < RESUME_AND_FORK (opencode --fork, droid --fork, amp threads fork). Fork is what an orchestrator actually needs for speculative branches, and only three harnesses have it. Also record `sessionIdSource`: IN_STREAM (cursor/amp/droid/agy/copilot-jsonl) vs MUST_SYNTHESIZE (gemini historically omitted session_id from headless JSON; a Copilot user's documented workaround was allocating a throwaway XDG_STATE_HOME per chain).",
+  "Normalize usage into one canonical shape and record per-harness fidelity: {input, output, reasoning, cacheRead, cacheWrite, totalTokens, costUsd?} with a `usageFidelity` enum NONE | TOTALS_ONLY | PER_TURN | PER_MESSAGE_WITH_CACHE_SPLIT. Only OpenCode (tokens.cache.read+write plus a precomputed `cost`) and Amp (cache_creation_input_tokens + cache_read_input_tokens) give a full cache split. Gemini/agy give cache READ only (agy also gives thinking_tokens separately). Cursor and Droid give NONE in their JSON envelopes — for those the orchestrator must fall back to an out-of-band provider quota probe or to wall-clock/turn-count budgeting.",
+  "Treat quota reporting as a Provider concern with an explicit `quotaProbe`, because almost no harness reports remaining quota in its output stream. The only programmatic probes found are `amp usage` (credit balance), Copilot's `--usage-output-file` JSON + post-session events.jsonl, and OpenCode's per-message `cost`. Everything else (Copilot /usage bars, Droid /cost and /stats, agy /usage aka /quota) is TUI-only. Design for quotaProbe.kind === 'none' being the common case and have the orchestrator maintain its own token ledger from the usage stream.",
+  "Encode permissions as a two-part model, not a single boolean: {mode: default|auto_edit|yolo|plan|sandbox, allow: Rule[], deny: Rule[]} where Rule supports a scoped grammar. Copilot's `shell(git:*)` / `write(<path>)` / `url(<glob>)` is the most expressive target to normalize toward; Droid's --restrict-tools/--additional-tools/--disabled-tools triple and Vibe's glob+`re:` regex matcher are the next tier; Gemini's flat `--allowed-tools a,b`, Amp's settings-file `amp.commands.allowlist`, and Cursor's `--sandbox enabled|disabled` + `--force` are coarse. Adapters should downgrade a rich policy to the coarsest supported form and REPORT the downgrade rather than silently over-permitting.",
+  "Do not rely on exit code alone for success. Encode `exit: {successCodes[], budgetCodes[], turnLimitCodes[], softDenyBehavior}`. Concrete traps: Gemini 42=input error, 53=turn limit; Qwen 55=budget exceeded; agy exits 0 on a soft-denied tool call with only a stderr notice; Copilot historically did not fail non-interactive runs whose prompt was blocked (fixed later). Parse the terminal JSON `status`/`is_error` field as the authoritative signal and treat exit code as a secondary hint.",
+  "Add a `protocol` axis above `outputFormat`, because two harnesses now offer bidirectional stdio protocols that are strictly better than argv-per-turn: Droid's `--input-format stream-jsonrpc --output-format stream-jsonrpc` (line-delimited JSON-RPC with id correlation) and Copilot's `--server`/`--headless` JSON-RPC mode behind @github/copilot-sdk. Amp (--stream-json-input), agy (--input-format stream-json), and Claude Code (stream-json input) offer one-way streaming stdin. Model protocol as ARGV_ONESHOT | STDIN_STREAM | JSONRPC_STDIO | HTTP_SERVER (OpenCode `serve` + OpenAPI 3.1 at /doc) | ACP (Copilot). JSONRPC_STDIO and HTTP_SERVER let you keep a warm process and avoid per-turn cold start.",
+  "Record Windows support as an enum, not a bool: NATIVE (Copilot w/ PS6+, Cursor via the ?win32=true PowerShell installer, Droid droid.exe, Gemini, agy, Aider, Vibe), NATIVE_WITH_DEPS (Kimi Code — requires Git for Windows, KIMI_SHELL_PATH), WSL_RECOMMENDED (OpenCode — native choco/scoop/npm exist but WSL is recommended and Bun-on-Windows is in progress), WSL_ONLY (Amp — 'macOS, Linux, and Windows through WSL'). Given this orchestrator runs on Windows 11, Amp is the one harness that cannot run in-process without a WSL shim.",
+  "Pin harness versions explicitly and disable auto-update in the adapter. Droid exposes FACTORY_DROID_AUTO_UPDATE_ENABLED=false; Copilot ships prerelease channels (@prerelease, winget GitHub.Copilot.Prerelease) and changes flags across releases; Gemini publishes nightly builds daily. An orchestrator that parses JSON event shapes needs a version-capability matrix and a startup handshake (`--version` / `--print-debug-info`) that refuses unknown majors.",
+  "Prefer these five harnesses for a v2 adapter set, in order: (1) OpenCode — fork + full cache-split usage + cost + HTTP server + BYO-provider, so it doubles as a Provider-multiplexer; (2) Droid — JSON-RPC stdio, fork, richest tool-restriction triple, native Windows, clean fk- key; (3) Copilot CLI — JSONL output, named+id resume, scoped permission grammar, --usage-output-file, stdin token login, and the only vendor-sanctioned subscription reuse; (4) Amp — Claude-Code-shaped stream-json with full cache split, thread fork, `amp usage` quota probe, explicit BYO-subscription support (accept the WSL constraint); (5) Codex CLI — --json + --output-schema + exec resume. Defer Cursor (no usage in output), Kimi/Qwen/Vibe (thin but cheap to add later since they mimic gemini-cli/Claude Code shapes), and skip Aider (no JSON, unsupported API, maintenance mode).",
+  "Model Google as a currently-unschedulable Provider rather than deleting it: keep the gemini-cli Harness adapter (it still works with paid Gemini API keys / Vertex and the repo is live), mark provider `google-consumer-oauth` as prohibited+headlessIncapable, and leave a stub for the Antigravity SDK (not the `agy` CLI) as the future compliant path — maintainers explicitly redirect CI users to it.",
+  "Add a `budget` block to Harness for pre-emptive cost control, since several harnesses can self-limit and that is cheaper than orchestrator-side policing: Qwen `--max-session-turns/--max-wall-time/--max-tool-calls`, Vibe `--max-turns` and `--max-price` (docs call --max-price unreliable — record reliability per field), Gemini turn-limit exit 53, agy `--print-timeout` (default 5m, a real hang risk for long agent runs), Copilot subagents.maxDepth (default lowered 6→4)."
+ ],
+ "unknowns": [
+  "Copilot CLI's `--output-format json` exact JSONL event schema is not in the official docs — only the changelog line 'Add --output-format json flag to emit JSONL in prompt mode for programmatic integrations' and the closed issue #52. Verify locally with `copilot -p 'say hi' --output-format json 2>/dev/null | head -20` and inspect whether session_id and a usage/cost object appear in the terminal event (the issue author specifically asked for both).",
+  "Copilot CLI `--usage-output-file` schema is undocumented (changelog only says it gained 'per-agent usage metrics'). Verify with `copilot -p 'hi' --usage-output-file %TEMP%\\u.json` then cat the file; also check ~/.copilot for the post-session events.jsonl shape.",
+  "Whether Copilot CLI charges 'premium requests' per headless prompt and whether remaining quota is machine-readable anywhere outside the TUI /usage view. Check the --usage-output-file payload and any GitHub REST billing endpoint for Copilot usage.",
+  "Whether `copilot --server` / `--headless` JSON-RPC is a documented stable protocol or SDK-internal. Only changelog references found ('--plugin-dir and --additional-mcp-config now work in --server / --headless mode', 'Remote JSON RPC is now enabled by default'). npmjs.com/package/@github/copilot-sdk returned HTTP 403 to WebFetch — read the package README via `npm view @github/copilot-sdk readme` or the tarball instead.",
+  "Gemini CLI's *current* headless docs no longer show a full JSON example; the field list here was reconstructed from source (packages/core/src/output/types.ts + telemetry/uiTelemetry.ts on main). Confirm the runtime shape against the pinned version you actually install, since main is on v0.61.0-nightly.",
+  "Whether `agy` can be authenticated by copying a credential file from an interactive login into a headless worker (the keyring is described as machine-wide, and one comment mentions 'exactly one credential the Antigravity CLI reads per process rather than from the machine-wide keyring: a Gemini API key, taken from the environment' — which contradicts the repro showing GEMINI_API_KEY ignored). Test: log in once, then run `agy -p ... --output-format json` in a service/non-TTY context and see whether it reuses the stored token.",
+  "The Antigravity SDK (antigravity.google/docs/sdk/overview) — maintainers point CI users there and say it accepts an API key. Its headless surface, session model, and usage reporting were not examined and may be the actual compliant Google path.",
+  "Cursor CLI: whether any flag or sidecar emits token usage or remaining plan credits (nothing in the documented event schema). Check `agent --help` for undocumented flags and whether the Cursor Admin/usage API can be polled per API key.",
+  "Cursor CLI: whether `--resume` accepts a session id emitted by a prior `--output-format json` run across separate processes, and whether there is a fork primitive. `agent ls` exists but its output shape is undocumented.",
+  "Amp: whether `amp usage` has a machine-readable (JSON) output mode, and whether `--stream-json` is accepted alongside `amp threads continue -x`. Test `amp usage --help` and `amp -x 'hi' --stream-json | tail -1`.",
+  "Amp on native Windows: docs say 'macOS, Linux, and Windows through WSL'. Whether the install.sh binary runs under Git Bash on Windows without WSL is untested.",
+  "Droid: whether `-o json`/`stream-json` carries token usage anywhere (the documented envelope has none, and /cost and /stats are TUI-only). Check `droid exec 'hi' -o stream-json` output lines for a usage field, and whether stream-jsonrpc notifications include usage.",
+  "Droid auth: whether a subscription/`droid login` path exists in addition to FACTORY_API_KEY, and which plans gate which models.",
+  "Kimi Code CLI: whether `--output-format` has a `json` (non-stream) value, the exact stream-json event schema, whether token usage appears anywhere, and whether Kimi OAuth can be used non-interactively. Check `kimi --help` and the print-mode docs.",
+  "Mistral Vibe: the `--output json` schema (no example found), whether it contains usage/cost, and whether `vibe` has a subscription-OAuth mode distinct from MISTRAL_API_KEY that would carry policy risk. Also whether --max-price is reliable enough to depend on (docs themselves flag it).",
+  "OpenCode `run --format json` emits 'raw JSON events' — the exact event envelope (vs the SDK's typed Message objects) was not confirmed. Run `opencode run 'hi' --format json | head -30` and diff against packages/sdk/js/src/gen/types.gen.ts.",
+  "OpenAI's actual written policy on using a ChatGPT subscription for automated/orchestrated Codex runs — only secondary sources were found. Check platform.openai.com usage policies and the ChatGPT business/consumer terms for an explicit clause.",
+  "Whether any vendor exposes a rate-limit *headroom* field in the CLI stream (as opposed to an error after the fact). None was found; if an orchestrator needs pre-emptive backoff it will have to infer from the rateLimitSignal error patterns, which were not catalogued per-harness here."
+ ]
+}
