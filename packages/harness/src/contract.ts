@@ -18,6 +18,8 @@
 //  - Usage always carries five fields. Harnesses without a cache split or without
 //    a reasoning bucket report 0 there and the fidelity derivation says so.
 
+import type { StdioOptions } from 'node:child_process';
+
 export type MeterKind = 'subscription' | 'metered' | 'local' | 'unknown';
 export type AutomationStance = 'sanctioned' | 'gray' | 'prohibited';
 export type CredentialKind = 'oauth_subscription' | 'api_key' | 'none';
@@ -195,7 +197,7 @@ export interface HarnessRunOptions {
 export type SpawnLike = (
   bin: string,
   args: string[],
-  opts: { cwd?: string; shell?: boolean; windowsHide?: boolean; env?: NodeJS.ProcessEnv; stdio?: unknown },
+  opts: { cwd?: string; shell?: boolean; windowsHide?: boolean; env?: NodeJS.ProcessEnv; stdio?: StdioOptions },
 ) => ChildLike;
 
 export interface ChildLike {
@@ -216,7 +218,11 @@ export interface HarnessRunResult {
   sessionId: string;
   /** Assistant turns observed on the run. */
   turns: number;
-  stoppedBy?: 'budget' | 'idle' | 'cancelled';
+  /** Set when the run was cut short on purpose and its partial work banked: a
+   *  budget trip or a caller cancel both RESOLVE (the edits are in the worktree
+   *  and the caller's success path pushes them). An idle kill REJECTS — there is
+   *  nothing to bank from a student that said nothing for twenty minutes. */
+  stoppedBy?: 'budget' | 'cancelled';
   transcriptPath?: string;
   /** The harness's own cost figure when `reportsCost`; null otherwise. A client-
    *  side estimate on subscription lanes — never present it as an amount charged. */
@@ -242,7 +248,8 @@ export interface FailureVerdict {
 
 export interface PreflightResult {
   ok: boolean;
-  bin: string;
+  /** Absent when resolution itself failed (nothing spawnable was found). */
+  bin?: string;
   version?: string;
   /** True only when a trivial real completion succeeded — `--version` passes with
    *  an expired login, which is exactly the failure this exists to catch. */
