@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>study-hall</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="dot" id="engine-dot"></span> study-hall <span class="muted" id="version"></span></div>
+  <nav id="nav">
+    <a href="#/overview" data-tab="overview">Overview</a>
+    <a href="#/boards" data-tab="boards">Boards</a>
+    <a href="#/pool" data-tab="pool">Pool</a>
+    <a href="#/runs" data-tab="runs">Runs</a>
+    <a href="#/planner" data-tab="planner">Planner</a>
+    <a href="#/arena" data-tab="arena">Arena</a>
+    <a href="#/settings" data-tab="settings">Settings</a>
+  </nav>
+  <div class="provider-toggle" id="provider-toggle" title="Provider for this screen">
+    <span class="muted" id="toggle-scope"></span>
+    <button data-choice="anthropic">Claude</button>
+    <button data-choice="openai">ChatGPT</button>
+    <button data-choice="auto">Both</button>
+    <button data-choice="inherit" class="subtle" title="Follow the global default">↺</button>
+  </div>
+</header>
+<main id="screen"></main>
+<footer class="foot muted" id="foot"></footer>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

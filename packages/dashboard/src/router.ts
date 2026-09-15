@@ -116,7 +116,10 @@ export class Router {
       const out = await matched.handler(ctx);
       if (owned) return true;
       const store = method === 'GET' ? 'no-store' : undefined;
-      sendJson(res, 200, out === undefined ? { ok: true } : out, store);
+      // A handler may set a non-200 status (e.g. 404 for "no such run") and still
+      // return a JSON body; the default stays 200.
+      const status = res.statusCode && res.statusCode !== 200 ? res.statusCode : 200;
+      sendJson(res, status, out === undefined ? { ok: true } : out, store);
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       this.logger(`route ${method} ${path} failed: ${detail}`);
