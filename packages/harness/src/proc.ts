@@ -54,8 +54,16 @@ export function fallbackDirs(env: NodeJS.ProcessEnv = process.env, home: string 
 
 function execExtensions(env: NodeJS.ProcessEnv): string[] {
   if (process.platform !== 'win32') return [''];
+  // PATHEXT first: an extension-less hit on Windows is an sh shim (npm writes
+  // one next to the .cmd), which CreateProcess cannot run without a shell.
   const fromEnv = (env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
-  return ['', ...fromEnv.map((e) => e.toLowerCase())];
+  return [...fromEnv.map((e) => e.toLowerCase()), ''];
+}
+
+/** On Windows only .exe/.com can be spawned directly; everything else is a shim. */
+function isShimPath(p: string): boolean {
+  if (process.platform !== 'win32') return false;
+  return !/\.(exe|com)$/i.test(p);
 }
 
 function firstHit(dirs: string[], name: string, env: NodeJS.ProcessEnv): string | null {
@@ -92,12 +100,12 @@ export function resolveBin(
   const raw = (configured || '').trim().replace(/^"|"$/g, '');
   if (!raw) return { path: raw, found: false, isShim: false };
   if (isAbsolute(raw) || raw.includes('/') || raw.includes('\\')) {
-    return { path: raw, found: existsSync(raw), isShim: /\.(cmd|bat)$/i.test(raw) };
+    return { path: raw, found: existsSync(raw), isShim: isShimPath(raw) };
   }
   const pathDirs = (env.PATH || env.Path || '').split(delimiter).filter(Boolean);
   const hit = firstHit(pathDirs, raw, env) ?? firstHit(fallbackDirs(env, home), raw, env);
   if (!hit) return { path: raw, found: false, isShim: false };
-  return { path: hit, found: true, isShim: /\.(cmd|bat)$/i.test(hit) };
+  return { path: hit, found: true, isShim: isShimPath(hit) };
 }
 
 /**

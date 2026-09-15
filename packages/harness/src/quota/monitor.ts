@@ -88,11 +88,15 @@ export class BasicQuotaMonitor implements QuotaMonitor {
     if (!o || now - o.observedAt > this.opts.staleMs) return 'unknown';
     if (o.allowed === false) return 'exhausted';
     // Predicted headroom: any known window at/above the handover threshold.
-    const windows = [o.fiveHour, o.sevenDay, ...Object.values(o.extra ?? {})];
+    const windows = [o.fiveHour, o.sevenDay, ...Object.values(o.extra ?? {})].filter((w): w is NonNullable<typeof w> => !!w);
     for (const w of windows) {
-      if (w && w.resetsAt > now && w.utilization >= this.opts.handoverAt) return 'exhausted';
+      if (w.resetsAt > now && w.utilization >= this.opts.handoverAt) return 'exhausted';
     }
-    return 'available';
+    // AVAILABLE needs positive evidence: the provider said usage is allowed, or
+    // at least one window is known and below the threshold. An observation that
+    // carries neither (a failed read, "not logged in") is UNKNOWN, never available.
+    if (o.allowed === true || windows.length > 0) return 'available';
+    return 'unknown';
   }
 
   subscribe(fn: (snapshot: QuotaSnapshot) => void): () => void {
