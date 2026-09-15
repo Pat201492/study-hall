@@ -6,10 +6,12 @@ import { renderSettings } from './settings.js';
 import { renderPlanner } from './planner.js';
 import { renderBoards } from './boards.js';
 import { renderPool } from './pool.js';
+import { renderEditor } from './editor.js';
+import { renderAdmissions } from './admissions.js';
 
 /** @typedef {'anthropic'|'openai'|'auto'} ProviderChoice */
 
-const SURFACE_OF_TAB = { overview: null, boards: 'board', pool: 'board', runs: null, planner: 'planner', arena: 'arena', settings: null };
+const SURFACE_OF_TAB = { overview: null, boards: 'board', pool: 'board', runs: null, planner: 'planner', editor: 'editor', admissions: 'admissions', arena: 'arena', settings: null };
 const LABEL = { anthropic: 'Claude', openai: 'ChatGPT', auto: 'Both (failover)' };
 
 export const api = {
@@ -84,6 +86,8 @@ const screens = {
   boards: renderBoards,
   pool: renderPool,
   planner: renderPlanner,
+  editor: renderEditor,
+  admissions: renderAdmissions,
   arena: (el) => { el.innerHTML = '<div class="empty">Arena report viewer lands with study-arena (phase 5).</div>'; },
 };
 
