@@ -8,6 +8,7 @@ import { renderBoards } from './boards.js';
 import { renderPool } from './pool.js';
 import { renderEditor } from './editor.js';
 import { renderAdmissions } from './admissions.js';
+import { renderArena } from './arena.js';
 
 /** @typedef {'anthropic'|'openai'|'auto'} ProviderChoice */
 
@@ -88,7 +89,7 @@ const screens = {
   planner: renderPlanner,
   editor: renderEditor,
   admissions: renderAdmissions,
-  arena: (el) => { el.innerHTML = '<div class="empty">Arena report viewer lands with study-arena (phase 5).</div>'; },
+  arena: renderArena,
 };
 
 let teardown = null;

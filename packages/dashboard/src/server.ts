@@ -11,6 +11,7 @@ import { serveStatic } from './static.js';
 import { mountPlanner } from './plannerRoutes.js';
 import { mountEngine, type BoardGitHub } from './engineRoutes.js';
 import { mountEditor, type EditorDeps } from './editorRoutes.js';
+import { mountArena } from './arenaRoutes.js';
 import {
   configPath, isProviderChoice, isSurface, loadConfig, mutateConfig, providerFor, SURFACES, type StudyHallConfig,
 } from './config.js';
@@ -36,6 +37,8 @@ export interface ServerDeps {
   engineCommand?: { command: string; args: string[] };
   /** Editor/Admissions seams (tests fake the student, GitHub and the checkout). */
   editor?: Pick<EditorDeps, 'runEditorFn' | 'admissionsPort' | 'splitStudent' | 'checkout' | 'fileDeps'>;
+  /** Arena export seam (tests return a canned envelope). */
+  arenaExport?: (arenaDir: string) => Promise<string>;
 }
 
 export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Ledger; cfg: () => StudyHallConfig; stop: () => void } {
@@ -71,6 +74,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
   const planner = mountPlanner(router, { cfg, ledger, baseUrl: () => `http://127.0.0.1:${cfg().port}` });
   const engine = mountEngine(router, { cfg, ledger, github: deps.github, engineCommand: deps.engineCommand });
   const editor = mountEditor(router, { cfg, ledger, ...(deps.editor ?? {}) });
+  mountArena(router, { cfg, exportJson: deps.arenaExport });
 
   router.get('/api/health', () => ({ ok: true, version: VERSION, uptimeMs: Date.now() - bootedAt }));
 

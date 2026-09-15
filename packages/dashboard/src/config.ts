@@ -35,6 +35,8 @@ export interface StudyHallConfig {
   models: Record<string, { haiku?: string; sonnet?: string; opus?: string; default?: string }>;
   /** Where v1 kept its usage.jsonl, for the one-shot import. */
   v1UsagePath: string;
+  /** The study-arena checkout the Arena tab reads (defaults to the sibling ../study-arena). */
+  arenaDir?: string;
 }
 
 export const DEFAULT_CONFIG: StudyHallConfig = {
