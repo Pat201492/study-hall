@@ -4,3 +4,4 @@ export * from './drafts.js';
 export * from './staging.js';
 export * from './mcp.js';
 export * from './session.js';
+export * from './skill.js';

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ChatEvent, ChatSession, Harness } from '@study-hall/harness';
@@ -61,6 +61,16 @@ export class PlannerSession {
       id: this.id, repo: opts.repo, provider: opts.provider, harness: opts.harness.id,
       sessionId: opts.resume ?? null, cwd: opts.cwd, startedAt: new Date().toISOString(), turns: 0,
     };
+    // A resumed session replays the previous conversation's events so the UI
+    // shows the thread it is continuing, not a blank pane; seq continues from
+    // where the persisted ring left off so `since` cursors stay valid.
+    if (opts.resume) {
+      for (const e of PlannerSession.loadEvents(opts.stateDir, opts.repo, this.ringSize)) { this.ring.push(e); this.seq = Math.max(this.seq, e.seq); }
+      const last = PlannerSession.lastRecord(opts.stateDir, opts.repo);
+      if (last?.sessionId === opts.resume) this.record.turns = last.turns;
+    } else {
+      try { writeFileSync(this.eventsPath(), ''); } catch { /* a fresh session starts an empty log */ }
+    }
   }
 
   get isBusy(): boolean { return this.busy; }
@@ -102,6 +112,9 @@ export class PlannerSession {
     const stored = { seq: ++this.seq, ts: Date.now(), event };
     this.ring.push(stored);
     if (this.ring.length > this.ringSize) this.ring.shift();
+    if (event.type !== 'text' || !event.partial) {
+      try { appendFileSync(this.eventsPath(), JSON.stringify(stored) + '\n'); } catch { /* the log is a convenience */ }
+    }
     for (const fn of this.subs) { try { fn(stored); } catch { /* a listener must not break the session */ } }
   }
 
@@ -129,6 +142,22 @@ export class PlannerSession {
     this.persist();
   }
 
+  private eventsPath(): string {
+    const dir = join(this.opts.stateDir, 'planner', this.opts.repo.replace(/[/:]/g, '-'));
+    mkdirSync(dir, { recursive: true });
+    return join(dir, 'events.jsonl');
+  }
+  /** The persisted event log for a repo (newest `limit`), for resume replay. */
+  static loadEvents(stateDir: string, repo: string, limit = 500): StoredEvent[] {
+    const p = join(stateDir, 'planner', repo.replace(/[/:]/g, '-'), 'events.jsonl');
+    if (!existsSync(p)) return [];
+    const out: StoredEvent[] = [];
+    for (const line of readFileSync(p, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line) as StoredEvent); } catch { /* a torn line */ }
+    }
+    return out.slice(-limit);
+  }
   private recordPath(): string {
     const dir = join(this.opts.stateDir, 'planner', this.opts.repo.replace(/[/:]/g, '-'));
     mkdirSync(dir, { recursive: true });

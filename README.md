@@ -10,3 +10,11 @@ Layout: `packages/harness` (the shared adapter package `study-arena` imports), `
 Research dossiers behind every design call: `docs/research/`.
 
 Runs on Node ≥ 22.5 (`node:sqlite`), zero native dependencies, Windows-first, no CI (tests run locally).
+
+## Planner in your own terminal
+
+`node --import tsx scripts/install-planner-skill.ts <owner/name>` writes `/plan-feature` for Claude Code
+(`~/.claude/skills/plan-feature/SKILL.md`) and Codex (`~/.codex/skills/plan-feature.md`) from the same
+PLAN_ROLE the dashboard uses, and prints the `claude mcp add` one-liner that registers the dashboard's
+planner tools. Drafts proposed there land in the Planner tab's staging store; filing stays behind the
+dashboard's confirm. Live findings: `docs/adr/ADR-004-planner-transports.md`.
