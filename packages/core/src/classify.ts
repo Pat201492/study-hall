@@ -27,6 +27,8 @@ import type { Role } from './taskmap.js';
 export type ActionKind = 'MERGE' | 'FIX' | 'RESOLVE' | 'REVIEW' | 'PROMOTE' | 'NEEDS_DETAIL' | 'TRIAGE' | 'IMPLEMENT';
 
 export interface BoardAction {
+  /** owner/name of the board this action belongs to — a typed field, never a cast (v1 stamped it by cast and every multi-repo key bug came from that). */
+  repo: string;
   kind: ActionKind;
   target: 'issue' | 'pr';
   number: number;      // issue or PR number
@@ -112,8 +114,8 @@ const ROLE_FOR: Record<ActionKind, Role | null> = {
   PROMOTE: null, NEEDS_DETAIL: null, TRIAGE: 'triage', IMPLEMENT: 'implement',
 };
 
-function makeAction(kind: ActionKind, target: 'issue' | 'pr', number: number, reason: string): BoardAction {
-  return { kind, target, number, role: ROLE_FOR[kind], reason };
+function makeAction(repo: string, kind: ActionKind, target: 'issue' | 'pr', number: number, reason: string): BoardAction {
+  return { repo, kind, target, number, role: ROLE_FOR[kind], reason };
 }
 
 function hasLabel(labels: string[], name: string): boolean {
@@ -222,7 +224,7 @@ export function parkedItems(issues: RawIssue[], pulls: OpenPull[]): ParkedRef[] 
 }
 
 // One PR -> at most one action.
-function classifyPull(pr: OpenPull, cfg: ClassifyConfig): BoardAction | null {
+function classifyPull(repo: string, pr: OpenPull, cfg: ClassifyConfig): BoardAction | null {
   if (isParked(pr.labels)) return null;
   const changesRequested = hasLabel(pr.labels, 'changes-requested') || pr.reviewDecision === 'CHANGES_REQUESTED';
   const reviewedOk = hasLabel(pr.labels, 'reviewed-ok') || pr.reviewDecision === 'APPROVED';
@@ -231,24 +233,24 @@ function classifyPull(pr: OpenPull, cfg: ClassifyConfig): BoardAction | null {
   const greenCI = pr.statusCheckRollup === 'SUCCESS' || pr.statusCheckRollup === '';
 
   if (changesRequested || redCI) {
-    return makeAction('FIX', 'pr', pr.number, changesRequested ? 'Reviewer requested changes.' : 'CI is red.');
+    return makeAction(repo, 'FIX', 'pr', pr.number, changesRequested ? 'Reviewer requested changes.' : 'CI is red.');
   }
   if (pr.mergeable === 'CONFLICTING') {
-    return makeAction('RESOLVE', 'pr', pr.number, 'PR conflicts with its base branch.');
+    return makeAction(repo, 'RESOLVE', 'pr', pr.number, 'PR conflicts with its base branch.');
   }
   if (reviewedOk && greenCI && pr.mergeable === 'MERGEABLE') {
     if (!cfg.autoMerge) return null; // PR-only: a human merges.
-    return makeAction('MERGE', 'pr', pr.number, 'Approved, green, and mergeable.');
+    return makeAction(repo, 'MERGE', 'pr', pr.number, 'Approved, green, and mergeable.');
   }
   if (!reviewedOk) {
-    return makeAction('REVIEW', 'pr', pr.number, 'PR has no review verdict yet.');
+    return makeAction(repo, 'REVIEW', 'pr', pr.number, 'PR has no review verdict yet.');
   }
   return null; // reviewed-ok but CI pending / mergeability unknown -> wait.
 }
 
 // One issue -> at most one action. `openIssueNumbers` is the set of still-open
 // issue numbers; a dep NOT in it is closed (its PR merged).
-function classifyIssue(issue: RawIssue, openIssueNumbers: Set<number>, cfg: ClassifyConfig = {}): BoardAction | null {
+function classifyIssue(repo: string, issue: RawIssue, openIssueNumbers: Set<number>, cfg: ClassifyConfig = {}): BoardAction | null {
   const deps = parseDeps(issue.body).map((d) => Number(d.slice(1)));
   const openDeps = deps.filter((n) => openIssueNumbers.has(n));
   if (openDeps.length > 0) return null; // still blocked by an open dependency.
@@ -258,7 +260,7 @@ function classifyIssue(issue: RawIssue, openIssueNumbers: Set<number>, cfg: Clas
   const labels = issue.labels.map((l) => l.name);
   if (isParked(labels)) return null;
   if (hasLabel(labels, 'blocked')) {
-    return makeAction('PROMOTE', 'issue', issue.number, 'Blocking dependencies are now closed.');
+    return makeAction(repo, 'PROMOTE', 'issue', issue.number, 'Blocking dependencies are now closed.');
   }
 
   // An epic is a TRACKER, not a unit of work. Scope triage carved its criteria
@@ -299,8 +301,7 @@ function classifyIssue(issue: RawIssue, openIssueNumbers: Set<number>, cfg: Clas
 
   if (audit.verdict === 'underspecified' && cfg.issueAudit?.enforce) {
     if (flagged) return null;   // already labelled and waiting on a human
-    return makeAction(
-      'NEEDS_DETAIL', 'issue', issue.number,
+    return makeAction(repo, 'NEEDS_DETAIL', 'issue', issue.number,
       `Not actionable as written: ${audit.reasons.join('; ')}.`,
     );
   }
@@ -314,15 +315,14 @@ function classifyIssue(issue: RawIssue, openIssueNumbers: Set<number>, cfg: Clas
   // is enough, so a future divergence fails toward assessing rather than toward
   // silently building an epic.
   if (cfg.triage !== false && (audit.verdict === 'oversized' || needsTriage(issue))) {
-    return makeAction('TRIAGE', 'issue', issue.number, 'Large issue, not yet assessed for scope.');
+    return makeAction(repo, 'TRIAGE', 'issue', issue.number, 'Large issue, not yet assessed for scope.');
   }
-  return makeAction(
-    'IMPLEMENT', 'issue', issue.number,
+  return makeAction(repo, 'IMPLEMENT', 'issue', issue.number,
     deps.length ? 'Dependencies closed; ready to build.' : 'Ready to build.',
   );
 }
 
-export function classify(issues: RawIssue[], pulls: OpenPull[], cfg: ClassifyConfig = {}): BoardAction[] {
+export function classify(issues: RawIssue[], pulls: OpenPull[], cfg: ClassifyConfig = {}, repo = ''): BoardAction[] {
   const actions: BoardAction[] = [];
 
   // Issues whose parking label must also hold back their PR.
@@ -347,7 +347,7 @@ export function classify(issues: RawIssue[], pulls: OpenPull[], cfg: ClassifyCon
   for (const pr of pulls) {
     const linked = pullIssueNumber(pr);
     if (linked !== null && parkedIssues.has(linked)) continue;
-    const a = classifyPull(pr, cfg);
+    const a = classifyPull(repo, pr, cfg);
     if (a) actions.push(a);
   }
 
@@ -362,7 +362,7 @@ export function classify(issues: RawIssue[], pulls: OpenPull[], cfg: ClassifyCon
   const openIssueNumbers = new Set(issues.map((i) => i.number));
   for (const issue of issues) {
     if (issuesInPr.has(issue.number)) continue;
-    const a = classifyIssue(issue, openIssueNumbers, cfg);
+    const a = classifyIssue(repo, issue, openIssueNumbers, cfg);
     if (a) actions.push(a);
   }
 
