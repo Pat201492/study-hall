@@ -3,6 +3,7 @@
 import { renderOverview } from './overview.js';
 import { renderRuns } from './runs.js';
 import { renderSettings } from './settings.js';
+import { renderPlanner } from './planner.js';
 
 /** @typedef {'anthropic'|'openai'|'auto'} ProviderChoice */
 
@@ -80,7 +81,7 @@ const screens = {
   settings: renderSettings,
   boards: (el) => { el.innerHTML = '<div class="empty">Boards land with the engine port (phase 2).</div>'; },
   pool: (el) => { el.innerHTML = '<div class="empty">Pool lands with the engine port (phase 2).</div>'; },
-  planner: (el) => { el.innerHTML = '<div class="empty">Planner terminal lands in phase 4 (chat transport + MCP lint/file tools are built; UI next).</div>'; },
+  planner: renderPlanner,
   arena: (el) => { el.innerHTML = '<div class="empty">Arena report viewer lands with study-arena (phase 5).</div>'; },
 };
 

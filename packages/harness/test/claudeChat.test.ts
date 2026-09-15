@@ -58,6 +58,7 @@ test('chatArgs: every option in its fixed position', () => {
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--include-partial-messages', '--replay-user-messages', '--permission-mode', 'default',
     '--model', 'opus', '--effort', 'high', '--tools', 'Read', 'Grep', 'mcp__plan__*',
+    '--allowedTools', 'Read', 'Grep', 'mcp__plan__*',
     '--append-system-prompt', 'You are the planner.',
     '--mcp-config', '/cfg/plan.json', '--strict-mcp-config',
     '--session-id', 'uuid-1', '--resume', 'old-1',

@@ -8,6 +8,7 @@ import {
 } from '@study-hall/harness';
 import { Router, type SseStream } from './router.js';
 import { serveStatic } from './static.js';
+import { mountPlanner } from './plannerRoutes.js';
 import {
   configPath, isProviderChoice, isSurface, loadConfig, mutateConfig, providerFor, SURFACES, type StudyHallConfig,
 } from './config.js';
@@ -59,6 +60,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
   }
 
   const router = new Router();
+  const planner = mountPlanner(router, { cfg, ledger, baseUrl: () => `http://127.0.0.1:${cfg().port}` });
 
   router.get('/api/health', () => ({ ok: true, version: VERSION, uptimeMs: Date.now() - bootedAt }));
 
@@ -171,6 +173,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
   });
 
   const stop = (): void => {
+    void planner.stop();
     for (const u of unsubscribe) u();
     for (const s of quotaStreams) s.close();
     openaiQuota.stop();

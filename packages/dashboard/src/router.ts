@@ -17,6 +17,8 @@ export interface RouteContext {
   query: URLSearchParams;
   /** Parsed JSON body for POST/PUT/PATCH; `{}` when empty or not JSON. */
   body: Record<string, unknown>;
+  /** The raw parsed JSON value (an array for a JSON-RPC batch); undefined when none. */
+  json: unknown;
   /** Take ownership of the response as a Server-Sent Events stream. */
   sse(): SseStream;
   /** Take ownership of the response (the handler writes it itself). */
@@ -105,9 +107,11 @@ export class Router {
     }
 
     let owned = false;
+    const json = await readJsonValue(req);
     const ctx: RouteContext = {
       req, res, method, path, params, query: url.searchParams,
-      body: await readJsonBody(req),
+      body: json && typeof json === 'object' && !Array.isArray(json) ? (json as Record<string, unknown>) : json === undefined ? {} : { value: json },
+      json,
       own: () => { owned = true; return res; },
       sse: () => { owned = true; return openSse(res); },
     };
@@ -145,9 +149,10 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, cac
   res.end(payload);
 }
 
-export async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+/** The request body parsed as JSON; undefined when empty, absent or not JSON. */
+export async function readJsonValue(req: IncomingMessage): Promise<unknown> {
   const method = (req.method || 'GET').toUpperCase();
-  if (method === 'GET' || method === 'HEAD') return {};
+  if (method === 'GET' || method === 'HEAD') return undefined;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -157,13 +162,14 @@ export async function readJsonBody(req: IncomingMessage): Promise<Record<string,
     chunks.push(b);
   }
   const text = Buffer.concat(chunks).toString('utf8').trim();
-  if (!text) return {};
-  try {
-    const v = JSON.parse(text);
-    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : { value: v };
-  } catch {
-    return {};
-  }
+  if (!text) return undefined;
+  try { return JSON.parse(text); } catch { return undefined; }
+}
+
+export async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const v = await readJsonValue(req);
+  if (v === undefined) return {};
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : { value: v };
 }
 
 function openSse(res: ServerResponse): SseStream {

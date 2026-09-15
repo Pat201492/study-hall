@@ -50,7 +50,11 @@ export function chatArgs(opts: ChatOptions): string[] {
     '--permission-mode', 'default',
     ...(opts.model ? ['--model', opts.model] : []),
     ...(opts.effort ? ['--effort', opts.effort] : []),
-    ...(opts.tools && opts.tools.length ? ['--tools', ...opts.tools] : []),
+    // `--tools` restricts what EXISTS; `--allowedTools` pre-approves it. With no
+    // human at a permission prompt, an MCP call in default mode would otherwise
+    // stall on "requested permissions … but you haven't granted it yet". The
+    // surface is read-only + planner tools, so approving all of it is safe.
+    ...(opts.tools && opts.tools.length ? ['--tools', ...opts.tools, '--allowedTools', ...opts.tools] : []),
     ...(opts.systemPrompt ? ['--append-system-prompt', opts.systemPrompt] : []),
     ...(opts.mcpConfig ? ['--mcp-config', opts.mcpConfig, '--strict-mcp-config'] : []),
     ...(opts.sessionId ? ['--session-id', opts.sessionId] : []),
