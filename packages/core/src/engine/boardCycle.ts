@@ -52,6 +52,8 @@ export interface CycleState {
   quotas: Record<string, QuotaSnapshot | undefined>;
   /** Providers whose lane is halted (auth failure) and why. */
   halted?: Record<string, string | undefined>;
+  /** Providers resting on their own burn-rate cap (rateBudget.ts). */
+  rateCapped?: Record<string, { reason: string; resumesAt: number | null } | undefined>;
   /** The board surface's provider setting: an id, or 'auto' for failover. */
   providerChoice: ProviderChoice;
   failoverOrder: string[];
@@ -87,7 +89,7 @@ export type CycleConfig = Pick<EngineConfig, 'optimizationMode' | 'pools' | 'max
 
 export type HoldReason =
   | 'blackout' | 'drain' | 'capacity-pause' | 'bounded-run-spent' | 'contested'
-  | 'file-collision' | 'no-slots' | 'provider' | 'no-model';
+  | 'file-collision' | 'no-slots' | 'provider' | 'no-model' | 'rate-capped';
 
 export type Decision =
   | {
@@ -162,6 +164,9 @@ export function slotBudget(cfg: CycleConfig, state: CycleState): number {
   let providerHeadroom = 0;
   for (const id of state.failoverOrder) {
     if (state.halted?.[id]) continue;
+    // A provider resting on its burn-rate cap offers no slots this tick: counting
+    // them would size the budget for capacity the governor will refuse.
+    if (state.rateCapped?.[id]) continue;
     const cap = providerCap(cfg, id);
     if (cap == null) continue;
     providerHeadroom += Math.max(0, cap - (state.inFlightPerProvider[id] ?? 0));
@@ -237,6 +242,16 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
   }
   if (state.boundedRemaining != null && state.boundedRemaining <= 0) {
     decisions.push({ kind: 'hold', scope: 'tick', reason: 'bounded-run-spent' });
+    return result(0, 0);
+  }
+  // Every usable lane resting on its own burn cap is a TICK-level hold, not N
+  // per-action ones: the slot budget is zero precisely BECAUSE they are resting,
+  // and reporting that as "no slots" would send an operator hunting for a
+  // concurrency problem that does not exist.
+  const usable = (state.providerChoice === 'auto' ? state.failoverOrder : [state.providerChoice]).filter((id) => !state.halted?.[id]);
+  if (usable.length && usable.every((id) => state.rateCapped?.[id])) {
+    const soonest = usable.map((id) => state.rateCapped![id]!).sort((a, b) => (a.resumesAt ?? Infinity) - (b.resumesAt ?? Infinity))[0];
+    decisions.push({ kind: 'hold', scope: 'tick', reason: 'rate-capped', detail: soonest.reason });
     return result(0, 0);
   }
 
@@ -316,7 +331,7 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
 
     const sel = selectProvider({
       choice: state.providerChoice, failoverOrder: state.failoverOrder,
-      quotas: state.quotas, inFlight: inFlightPerProvider, caps, halted: state.halted,
+      quotas: state.quotas, inFlight: inFlightPerProvider, caps, halted: state.halted, rateCapped: state.rateCapped,
     });
     if (sel.reason === 'needs-probe' && sel.probe) {
       probed = sel.probe;
@@ -326,7 +341,8 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
     if (!sel.provider) {
       // One hold line per tick is enough — the reason is the same for every action.
       if (!providerHoldReported) {
-        decisions.push({ kind: 'hold', scope: 'action', reason: 'provider', action, detail: describeSelect(sel.reason, sel.detail) });
+        const paced = sel.reason === 'all-rate-capped' || sel.reason === 'pinned-but-rate-capped';
+        decisions.push({ kind: 'hold', scope: 'action', reason: paced ? 'rate-capped' : 'provider', action, detail: describeSelect(sel.reason, sel.detail) });
         providerHoldReported = true;
       }
       continue;

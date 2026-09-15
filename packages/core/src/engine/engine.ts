@@ -4,14 +4,15 @@ import { join } from 'node:path';
 import type { Harness, PreflightResult, QuotaMonitor, QuotaSnapshot, Usage } from '@study-hall/harness/contract';
 import { WarmSlot } from '@study-hall/harness/warmSlot';
 import { tokensProcessed, cacheHitPct } from '@study-hall/harness/pricing';
-import type { Ledger, EventRecord } from '@study-hall/harness/ledger/index';
+import type { Ledger, EventRecord, RunRecord } from '@study-hall/harness/ledger/index';
 import { decide, type BoardSnapshot, type CycleConfig, type Decision } from './boardCycle.js';
 import { Governance, type GovernanceVerdict } from './governance.js';
 import { Persistence, type RepoMemory } from './persistence.js';
 import { runRole as realRunRole, realGit, realGitHub, RoleRunError, type GitPort, type GitHubPort, type RoleRunOutput, type RoleRunInput, type RunnerDeps, type DispatchDecision } from './roleRunner.js';
 import { Reporter, watchdogReport, wedgedReport, contestedReport, killReport, type ReportPort } from './reporting.js';
 import { STATUS_SCHEMA, type EngineStatus, type RepoStatus, type StudentStatus, type InFlightRef } from './status.js';
-import { boardProviderChoice, type EngineConfig } from '../config.js';
+import { boardProviderChoice, rateLimitFor, type EngineConfig } from '../config.js';
+import { billedTokens, RateTracker, type RateVerdict } from '../rateBudget.js';
 import { classify, isParked, parkedItems, deadlockedPulls, pullIssueNumber, type BoardAction } from '../classify.js';
 import { issuesToTaskMap, specFingerprint, type RawIssue, type OpenPull } from '../github.js';
 import * as gh from '../github.js';
@@ -160,6 +161,9 @@ export class Engine {
   private readonly protectors = new Map<string, Protector>();
   private readonly slots = new Map<string, WarmSlot>();
   private readonly lastUsage = new Map<string, { tokens: number; cacheHitPct: number }>();
+  /** Burn-rate governor, one per provider; only capped providers get a tracker. */
+  private readonly rate = new Map<string, RateTracker>();
+  private readonly rateResting = new Map<string, number | null>();
   readonly assignments = new AssignmentLog();
   private readonly reporter: Reporter;
   private readonly log: EngineLog;
@@ -232,6 +236,20 @@ export class Engine {
       this.protectors.set(id, new Protector({ perTierMax, totalCap: pool.maxConcurrent, maxConcurrent: pool.maxConcurrent, worktreeRoot: join(this.persist.stateDir, 'students', id) }));
     }
 
+    // Burn-rate governors, seeded from the ledger so a restart does not forget
+    // the hour it just spent — the whole point is a window that cannot be
+    // laundered by bouncing the process.
+    this.syncRateTrackers();
+    if (this.rate.size) {
+      const oldest = Math.min(...[...this.rate.values()].map((t) => t.assess(this.now()).windowMs));
+      const samples = this.ledger.reader.spendSamples(new Date(this.now() - oldest));
+      for (const [id, tracker] of this.rate) {
+        tracker.seed(samples.filter((s) => s.provider === id));
+        const v = tracker.assess(this.now());
+        this.log.info(`${id}: burn cap ${Math.round((v.tokens.cap ?? 0) / 1000)}k tokens/${Math.round(v.windowMs / 60_000)}min — ${Math.round(v.tokens.spent / 1000)}k already spent in the window${v.capped ? ' (RESTING)' : ''}`);
+      }
+    }
+
     // Quota monitors and a real preflight per provider in the failover order.
     for (const id of cfg.provider.failoverOrder) {
       const quota = this.opts.ports.harnesses.quotaFor(id);
@@ -257,6 +275,46 @@ export class Engine {
   }
 
   private testRunPath(): string { return join(this.persist.stateDir, 'testrun.json'); }
+
+  /** Config is re-read every tick: add trackers for newly capped providers, drop
+   *  them when a cap is removed (the lane comes back at once, not at a reset). */
+  private syncRateTrackers(): void {
+    const cfg = this.cfg;
+    for (const id of new Set([...cfg.provider.failoverOrder, ...Object.keys(cfg.pools)])) {
+      const limit = rateLimitFor(cfg, id);
+      const existing = this.rate.get(id);
+      if (!limit) {
+        if (existing) { this.rate.delete(id); this.rateResting.delete(id); this.log.info(`${id}: burn cap removed — lane available again`); }
+        continue;
+      }
+      if (existing) existing.setLimit(limit);
+      else this.rate.set(id, new RateTracker(id, limit, this.now));
+    }
+  }
+
+  /** Providers resting on their own cap this tick, with transitions logged once. */
+  private assessRates(now: number): { capped: Record<string, { reason: string; resumesAt: number | null } | undefined>; verdicts: Record<string, RateVerdict> } {
+    const capped: Record<string, { reason: string; resumesAt: number | null } | undefined> = {};
+    const verdicts: Record<string, RateVerdict> = {};
+    for (const [id, tracker] of this.rate) {
+      const v = tracker.assess(now);
+      verdicts[id] = v;
+      const was = this.rateResting.has(id);
+      if (v.capped) {
+        capped[id] = { reason: v.reason ?? 'burn-rate cap reached', resumesAt: v.resumesAt };
+        if (!was) {
+          this.rateResting.set(id, v.resumesAt);
+          this.log.warn(`${id}: RESTING on its burn cap — ${v.reason}${v.resumesAt ? `; resumes ${new Date(v.resumesAt).toLocaleTimeString()}` : ' (waiting on in-flight work to finish)'}`);
+          this.event({ level: 'warn', event: 'provider.rate-capped', reason: v.reason, data: { provider: id, spent: v.tokens.spent, cap: v.tokens.cap, resumesAt: v.resumesAt, inFlightTokens: v.inFlightTokens } });
+        }
+      } else if (was) {
+        this.rateResting.delete(id);
+        this.log.ok(`${id}: burn back under the cap (${Math.round(v.tokens.spent / 1000)}k of ${Math.round((v.tokens.cap ?? 0) / 1000)}k this window) — dispatching again`);
+        this.event({ level: 'info', event: 'provider.rate-resumed', data: { provider: id, spent: v.tokens.spent, cap: v.tokens.cap } });
+      }
+    }
+    return { capped, verdicts };
+  }
 
   private async seedRejections(rt: RepoRuntime, pulls: OpenPull[]): Promise<void> {
     await Promise.all(pulls.map(async (pr) => {
@@ -420,9 +478,11 @@ export class Engine {
       optimizationMode: cfg.optimizationMode, pools: cfg.pools, maxConcurrent: configuredParallel, autoMerge: cfg.autoMerge,
       acTiering: cfg.acTiering, harnessFor: this.opts.harnessFor, triage: cfg.triage, issueAudit: cfg.issueAudit,
     };
+    this.syncRateTrackers();
+    const rates = this.assessRates(now);
     const result = decide(boards, {
       now, inFlight: new Set(this.inFlight.keys()), inFlightFiles: [...this.inFlightFiles.values()].flat(), inFlightPerProvider,
-      quotas, halted: g.halted, providerChoice: choice, failoverOrder: cfg.provider.failoverOrder,
+      quotas, halted: g.halted, rateCapped: rates.capped, providerChoice: choice, failoverOrder: cfg.provider.failoverOrder,
       throttleLimit: g.throttleLimit, boundedRemaining: testRun ? Math.max(0, testRun.limit - testRun.done) : null, boundedUnit: testRun?.unit,
       rewriteItems, attempts: this.gov.watchdog.attemptSnapshot(), pausedUntil: g.pausedUntil, pauseReason: g.pauseReason,
       blackout: g.blackout, drain: this.draining, fairShareOffset: this.fairShareOffset++,
@@ -673,7 +733,12 @@ export class Engine {
       repo: { slug: rt.slug, configured: rt.configured, clone: rt.clone, spec: rt.spec, tasks: rt.tasks, pulls: rt.pulls },
       pool: { approval: pool.approval, sandbox: pool.sandbox, tools: pool.tools },
       budget: cfg.studentBudget[d.role], rounds: this.gov.watchdog.attemptsFor(d.item), signal: abort.signal,
-      onUsage: (u) => { entry.usage = u; },
+      onUsage: (u) => {
+        entry.usage = u;
+        // Live burn counts the moment it happens: a fleet that starts five warm
+        // students should rest the lane now, not an hour from now.
+        this.rate.get(d.provider)?.live(runId, { tokens: billedTokens(u), usd: 0 });
+      },
       onQuota: (o) => this.opts.ports.harnesses.quotaFor(d.provider)?.observe(o),
     }, {
       git: this.opts.ports.runnerGit ?? realGit, gh: this.opts.ports.runnerGitHub ?? realGitHub,
@@ -683,6 +748,9 @@ export class Engine {
       .finally(() => {
         this.inFlight.delete(d.key);
         this.inFlightFiles.delete(d.key);
+        // Every exit path clears the live burn entry; a committed one has already
+        // replaced it, so this is a no-op except after a run that spent nothing.
+        this.rate.get(d.provider)?.drop(runId);
         protector.finish(w.id);
         this.onChange();
       });
@@ -769,10 +837,17 @@ export class Engine {
     }
   }
 
-  private noteUsage(d: DispatchDecision, run: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }): void {
+  private noteUsage(d: DispatchDecision, run: RunRecord): void {
     const e = [...this.inFlight.values()].find((x) => x.decision.key === d.key);
     const u = { inputTokens: run.inputTokens, outputTokens: run.outputTokens, cacheReadInputTokens: run.cacheReadInputTokens, cacheCreationInputTokens: run.cacheCreationInputTokens };
     this.lastUsage.set(e?.workerId ?? d.key, { tokens: tokensProcessed(u), cacheHitPct: cacheHitPct(u) });
+    // The run's spend moves from the live bucket to a committed sample, dated
+    // when it landed, so it ages out of the window on its own.
+    this.rate.get(d.provider)?.commit(run.runId, {
+      at: Date.parse(run.endedAt) || this.now(),
+      tokens: billedTokens({ ...u, reasoningTokens: run.reasoningTokens }),
+      usd: run.fidelity === 'exact' ? run.estimatedCostUsd : 0,
+    });
   }
 
   private noteUnit(unit: 'pr' | 'merge'): void {
@@ -870,6 +945,7 @@ export class Engine {
         cap: cfg.pools[id]?.maxConcurrent ?? 0,
         quota: this.opts.ports.harnesses.quotaFor(id)?.snapshot(now) ?? null,
         halted: halted[id] ?? null,
+        rate: this.rate.get(id)?.assess(now) ?? null,
       };
     }
     const pause = this.gov.dispatchPause(now);

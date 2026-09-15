@@ -8,6 +8,7 @@ import type { EngineStatus, RepoStatus } from '@study-hall/core/engine/status';
 import { classify, isParked, parkedItems, deadlockedPulls, pullIssueNumber, PARKED_LABELS } from '@study-hall/core/classify';
 import { fetchIssues, listOpenPulls, removeLabel, parseDeps, repoSlug, type RawIssue, type OpenPull } from '@study-hall/core/github';
 import { loadEngineConfig } from '@study-hall/core/config';
+import { assessRate, hasCap, resolveLimit, suggestTokensPerHour, DEFAULT_WINDOW_MS, type RateLimit } from '@study-hall/core/rateBudget';
 import { requestDrain, clearDrain, drainRequested } from '@study-hall/core/drain';
 import type { Router } from './router.js';
 import { configPath, mutateConfig, type StudyHallConfig } from './config.js';
@@ -118,6 +119,71 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     });
     deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: 'settings.bounded-run', reason: count === 0 ? 'UNBOUNDED' : `${count} ${unit ?? 'pr'}` });
     return { ok: true, boundedRun: loadEngineConfig(configPath()).boundedRun, note: 'takes effect on the next engine start' };
+  });
+
+  // ---- burn-rate governor --------------------------------------------------------------
+  //
+  // Read from the LEDGER, not from the engine: the number must be truthful when
+  // the engine is stopped (that is exactly when an operator is deciding what to
+  // set). The engine's own verdict is merged in when its snapshot is fresh,
+  // because only it knows what is burning in flight right now.
+  const burnView = (): { providers: Record<string, unknown>; windowMinutes: number; engineLive: boolean } => {
+    const c = deps.cfg();
+    const v = view();
+    const now2 = now();
+    const limits = c.provider.rateLimit ?? {};
+    const ids = [...new Set([...c.provider.failoverOrder, ...Object.keys(limits), ...Object.keys(c.provider.concurrency ?? {})])];
+    const windowMs = Math.max(...ids.map((id) => resolveLimit(limits[id]).windowMs), DEFAULT_WINDOW_MS);
+    const samples = deps.ledger.reader.spendSamples(new Date(now2 - Math.max(windowMs, 7 * 24 * 60 * 60_000)));
+    const providers: Record<string, unknown> = {};
+    for (const id of ids) {
+      const mine = samples.filter((s) => s.provider === id);
+      const limit = limits[id];
+      const fromLedger = assessRate(id, mine, [], limit, now2);
+      const fromEngine = v.live ? v.status?.providers?.[id]?.rate ?? null : null;
+      providers[id] = {
+        // The engine's verdict wins while it is live (it sees in-flight burn);
+        // the ledger's is the floor and the only reading when the engine is down.
+        rate: fromEngine ?? fromLedger,
+        source: fromEngine ? 'engine' : 'ledger',
+        limit: limit ?? null,
+        suggestedTokensPerHour: suggestTokensPerHour(mine, now2, resolveLimit(limit).windowMs),
+        runsInWindow: mine.filter((s) => s.at > now2 - resolveLimit(limit).windowMs).length,
+      };
+    }
+    return { providers, windowMinutes: Math.round(windowMs / 60_000), engineLive: v.live };
+  };
+
+  router.get('/api/burn', () => burnView());
+
+  router.post('/api/settings/rate-limit', (ctx) => {
+    const { provider, tokensPerHour, usdPerHour, windowMinutes, headroom } = ctx.body as { provider?: unknown; tokensPerHour?: unknown; usdPerHour?: unknown; windowMinutes?: unknown; headroom?: unknown };
+    if (typeof provider !== 'string' || !provider) throw new Error('provider is required');
+    const num = (v: unknown, name: string): number | undefined => {
+      if (v === undefined || v === null || v === '') return undefined;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) throw new Error(`${name} must be a non-negative number`);
+      return n;
+    };
+    const h = num(headroom, 'headroom');
+    if (h != null && (h <= 0 || h > 1)) throw new Error('headroom must be in (0, 1]');
+    const next: RateLimit = {
+      tokensPerHour: num(tokensPerHour, 'tokensPerHour'),
+      usdPerHour: num(usdPerHour, 'usdPerHour'),
+      windowMs: num(windowMinutes, 'windowMinutes') != null ? num(windowMinutes, 'windowMinutes')! * 60_000 : undefined,
+      headroom: h,
+    };
+    const cleared = !hasCap(next);
+    mutateConfig(configPath(), (raw) => {
+      const p = (raw.provider ??= {}) as Record<string, unknown>;
+      const rl = (p.rateLimit ??= {}) as Record<string, unknown>;
+      // A zero/blank cap REMOVES the entry: an uncapped provider is the absence
+      // of a limit, not a limit of zero (which would park the lane forever).
+      if (cleared) delete rl[provider];
+      else rl[provider] = Object.fromEntries(Object.entries(next).filter(([, v]) => v !== undefined));
+    });
+    deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: 'settings.rate-limit', reason: cleared ? `${provider}: uncapped` : `${provider}: ${next.tokensPerHour ?? 0} tokens/window` });
+    return { ok: true, provider, limit: cleared ? null : next, note: 'the engine picks this up on its next tick — no restart needed' };
   });
 
   // ---- boards ------------------------------------------------------------------------

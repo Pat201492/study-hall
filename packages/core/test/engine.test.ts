@@ -306,3 +306,64 @@ test('stop aborts in-flight students and kills every harness', async () => {
   await settle();
   r.ledger.close();
 });
+
+test('burn-rate governor: crossing the hourly cap rests the lane, the next tick fails over, and both are recorded', async () => {
+  const r = rig({
+    boards: { 'o/a': { issues: [issue(1), issue(2)], pulls: [] } },
+    // Each fake run bills 100 + 10 + 400 = 510 tokens, so two runs cross 1000.
+    config: { provider: { default: 'auto', failoverOrder: ['anthropic', 'openai'], perSurface: {}, rateLimit: { anthropic: { tokensPerHour: 1000, headroom: 1 } } } },
+  });
+  await r.engine.boot();
+  await r.engine.tick();
+  await settle();
+  assert.deepEqual(r.calls.filter((c) => c.startsWith('run')), ['run implement o/a#1 on anthropic', 'run implement o/a#2 on anthropic']);
+  const capped = r.engine.snapshot().providers.anthropic.rate;
+  assert.equal(capped?.capped, true);
+  assert.equal(capped?.tokens.spent, 1020);
+  assert.equal(capped?.tokens.cap, 1000);
+  assert.equal(r.engine.snapshot().providers.openai.rate, null, 'an uncapped lane has no governor');
+
+  // Tick 2: the PRs are on the board and want reviewing — on the other service.
+  await r.engine.tick();
+  await settle();
+  assert.deepEqual(r.calls.filter((c) => c.startsWith('run')).slice(2), ['run review o/a#11 on openai', 'run review o/a#12 on openai']);
+
+  const events = r.ledger.reader.events({ limit: 50 }).map((e) => e.event);
+  assert.ok(events.includes('provider.rate-capped'), 'the rest is a ledger event, not just a log line');
+
+  // Raising the cap lifts the rest immediately — no waiting on a vendor reset.
+  r.config.provider.rateLimit = { anthropic: { tokensPerHour: 10_000, headroom: 1 } };
+  r.boards['o/a'].issues.push(issue(3));
+  await r.engine.tick();
+  await settle();
+  assert.ok(r.calls.filter((c) => c.startsWith('run')).some((c) => c === 'run implement o/a#3 on anthropic'));
+  assert.ok(r.ledger.reader.events({ limit: 50 }).map((e) => e.event).includes('provider.rate-resumed'));
+  r.ledger.close();
+});
+
+test('burn-rate governor: with every lane capped the tick holds and nothing is dispatched', async () => {
+  const r = rig({
+    config: { provider: { default: 'auto', failoverOrder: ['anthropic', 'openai'], perSurface: {}, rateLimit: { anthropic: { tokensPerHour: 1, headroom: 1 }, openai: { tokensPerHour: 1, headroom: 1 } } } },
+  });
+  await r.engine.boot();
+  // Seed both windows over their caps through the ledger, as a restart would.
+  for (const provider of ['anthropic', 'openai']) {
+    r.ledger.recordRun({
+      schemaVersion: 2, runId: `seed-${provider}`, ts: new Date(1_700_000_000_000 - 60_000).toISOString(), startedAt: new Date(1_700_000_000_000 - 120_000).toISOString(),
+      endedAt: new Date(1_700_000_000_000 - 60_000).toISOString(), durationMs: 60_000, repo: 'o/a', item: 9, role: 'implement', provider, harness: 'h',
+      meter: 'subscription', fidelity: 'exact', inputTokens: 5000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0,
+      turns: 1, warmMechanism: 'cold', stoppedBy: null, estimatedCostUsd: 0, costBasis: 'list', pricingTableVersion: 'x',
+    });
+  }
+  // Booting again re-seeds both windows from the ledger — the hour just spent
+  // survives a restart, which is the whole point of seeding.
+  await r.engine.boot();
+  await r.engine.tick();
+  await settle();
+  assert.deepEqual(r.calls.filter((c) => c.startsWith('run')), [], 'nothing dispatched while every lane rests');
+  const st = r.engine.snapshot();
+  assert.equal(st.providers.anthropic.rate?.capped, true);
+  assert.equal(st.providers.openai.rate?.capped, true);
+  assert.equal(st.lastTick?.dispatched, 0);
+  r.ledger.close();
+});

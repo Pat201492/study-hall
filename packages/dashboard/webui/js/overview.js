@@ -39,6 +39,8 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
   const eff = status.provider?.effective ?? {};
   el.innerHTML = `
     <div class="grid" id="providers">${status.providers.map((p) => providerCard(p, fmt)).join('')}</div>
+    <h3 style="margin:14px 0 6px">Burn rate — pace the window, fail over before it empties</h3>
+    <div class="grid" id="burn"><div class="muted">reading the ledger…</div></div>
     <div class="grid" style="margin-top:12px">
       <div class="card"><h3>Engine</h3>
         <div id="engine-line">${engineLine(status.engine, fmt)}</div>
@@ -68,6 +70,7 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
   });
 
   const stopEngineTail = wireEngineControls(el, { api, fmt, refreshStatus });
+  const stopBurn = wireBurn(el, { api, fmt });
 
   // Live quota via SSE; re-render only the provider cards.
   const es = new EventSource('/api/quota/stream');
@@ -77,7 +80,69 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
     if (box) box.innerHTML = providers.map((p) => providerCard(p, fmt)).join('');
     el.querySelectorAll('button[data-probe]').forEach((b) => b.addEventListener('click', () => location.reload()));
   });
-  return () => { es.close(); stopEngineTail(); };
+  return () => { es.close(); stopEngineTail(); stopBurn(); };
+}
+
+// ---- burn-rate governor -----------------------------------------------------------
+// A cap here rests the provider when its sliding-window spend crosses the line;
+// with the toggle on Both, dispatch fails over to the other service and comes
+// back when the window rolls forward. Uncapped by default: the right number is
+// a fact about this account, so the suggestion comes from the ledger's own hours.
+
+function burnCard(id, b, windowMinutes, fmt) {
+  const r = b.rate;
+  const cap = r.tokens.cap;
+  const pct = cap ? Math.min(100, Math.round((r.tokens.spent / cap) * 100)) : null;
+  const cls = pct == null ? '' : pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : '';
+  const state = !cap
+    ? '<span class="muted">uncapped</span>'
+    : r.capped
+      ? `<span class="bad">resting</span>`
+      : '<span class="ok">dispatching</span>';
+  const bar = cap
+    ? `<div class="bar"><i class="${cls}" style="width:${pct}%"></i><b style="left:${Math.round((r.tokens.cap ? 90 : 0))}%"></b></div>
+       <div class="kv"><span>${fmt.tok(r.tokens.spent)} of ${fmt.tok(cap)} this ${windowMinutes} min</span><span class="muted">${pct}%${r.inFlightTokens ? ` · ${fmt.tok(r.inFlightTokens)} in flight` : ''}</span></div>`
+    : `<div class="kv"><span>${fmt.tok(r.tokens.spent)} spent this ${windowMinutes} min</span><span class="muted">${b.runsInWindow} run(s) · no cap set</span></div>`;
+  const resting = r.capped
+    ? `<div class="bad" style="margin-top:4px">${fmt.esc(r.reason ?? '')}${r.resumesAt ? ` — resumes ${new Date(r.resumesAt).toLocaleTimeString()}` : ' — waiting on in-flight work'}</div>`
+    : '';
+  const suggest = b.suggestedTokensPerHour
+    ? `<div class="muted" style="font-size:12px;margin-top:4px">Busiest recent hour on this lane: ${fmt.tok(b.suggestedTokensPerHour)} tokens. A cap below that parks the board; well above it never binds.</div>`
+    : '<div class="muted" style="font-size:12px;margin-top:4px">No history on this lane yet — run something first, or set a cap you are comfortable with.</div>';
+  return `<div class="card">
+    <div class="kv"><h2><span class="pill ${id}">${id}</span></h2>${state}</div>
+    <div class="muted" style="font-size:12px">source: ${b.source}${b.source === 'ledger' ? ' (engine stopped: in-flight burn not counted)' : ''}</div>
+    <div style="margin-top:6px">${bar}</div>${resting}
+    <div class="kv" style="margin-top:8px"><span>cap</span><span>
+      <input type="number" min="0" step="50" style="width:84px" data-cap="${id}" value="${cap ? Math.round(cap / 1000) : 0}"> <span class="muted">k tokens / hour</span>
+      <button class="btn" data-savecap="${id}">Save</button></span></div>
+    <div class="muted" style="font-size:12px">0 = uncapped. Takes effect on the engine's next tick.</div>
+    ${suggest}
+    <span class="muted" id="cap-msg-${id}"></span>
+  </div>`;
+}
+
+export function wireBurn(el, { api, fmt }) {
+  async function load() {
+    const box = el.querySelector('#burn');
+    if (!box) return;
+    const d = await api.get('/api/burn');
+    const ids = Object.keys(d.providers);
+    box.innerHTML = ids.length ? ids.map((id) => burnCard(id, d.providers[id], d.windowMinutes, fmt)).join('') : '<div class="muted">no providers configured</div>';
+    box.querySelectorAll('button[data-savecap]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.savecap;
+      const input = box.querySelector(`input[data-cap="${id}"]`);
+      const msg = box.querySelector(`#cap-msg-${id}`);
+      const k = Number(input.value);
+      msg.textContent = 'saving…';
+      const r = await api.post('/api/settings/rate-limit', { provider: id, tokensPerHour: k > 0 ? k * 1000 : 0 });
+      msg.textContent = r.ok ? (r.limit ? `capped at ${k}k/hour — ${r.note}` : 'uncapped') : (r.msg || 'failed');
+      await load();
+    }));
+  }
+  void load();
+  const t = setInterval(load, 10_000);
+  return () => clearInterval(t);
 }
 
 function engineLine(e, fmt) {

@@ -258,3 +258,23 @@ test('a read-only reader on the same directory sees the writer’s rows', () => 
   ro.close();
   ledger.close();
 });
+
+test('spendSamples returns one dated row per run in the window, for the burn-rate governor', () => {
+  const l = open();
+  l.recordRun(run('burn-old', { item: 1 }, { inputTokens: 1000, outputTokens: 100, cacheReadInputTokens: 2000, cacheCreationInputTokens: 500, reasoningTokens: 0 }));
+  l.recordRun(run('burn-new', { item: 30 }, { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 40 }));
+  l.recordRun(run('burn-codex', { item: 45, provider: 'openai', harness: 'codex', model: 'gpt-5.6-terra' }, { inputTokens: 7, outputTokens: 3, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 }));
+
+  const all = l.reader.spendSamples(at(0));
+  assert.deepEqual(all.map((s) => s.runId), ['burn-old', 'burn-new', 'burn-codex'], 'oldest first');
+  assert.equal(all[0].tokens, 3600, 'every billed bucket counts, cache writes included');
+  assert.equal(all[1].tokens, 55, 'separately-reported reasoning counts');
+  assert.equal(all[0].at, Date.parse(at(1)));
+  assert.equal(typeof all[0].usd, 'number');
+
+  // The window is a half-open lower bound on when the spend LANDED.
+  assert.deepEqual(l.reader.spendSamples(at(20)).map((s) => s.runId), ['burn-new', 'burn-codex']);
+  assert.deepEqual(l.reader.spendSamples(at(0), 'openai').map((s) => s.runId), ['burn-codex']);
+  assert.deepEqual(l.reader.spendSamples(at(100)), []);
+  l.close();
+});

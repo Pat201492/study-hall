@@ -1,3 +1,4 @@
+import type { RateLimit } from '@study-hall/core/rateBudget';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -24,6 +25,8 @@ export interface ProviderSettings {
   handoverAt: number;
   /** Concurrency per provider (Codex reports 429s above ~2-3 streams). */
   concurrency: Record<string, number>;
+  /** Burn-rate ceiling per provider; absent/zero = uncapped (core/rateBudget.ts). */
+  rateLimit?: Record<string, RateLimit>;
 }
 
 export interface StudyHallConfig {
@@ -78,6 +81,7 @@ export function loadConfig(path: string = configPath(), env: NodeJS.ProcessEnv =
   const provider = { ...DEFAULT_CONFIG.provider, ...(raw.provider ?? {}) };
   provider.perSurface = { ...(raw.provider?.perSurface ?? {}) };
   provider.concurrency = { ...DEFAULT_CONFIG.provider.concurrency, ...(raw.provider?.concurrency ?? {}) };
+  provider.rateLimit = { ...(raw.provider?.rateLimit ?? {}) };
   const cfg: StudyHallConfig = {
     ...DEFAULT_CONFIG,
     ...raw,

@@ -66,7 +66,7 @@ test('boards: the engine view (in-flight, attempts, contested) merges in when th
   st.repos['o/a'] = { repo: 'o/a', contested: true, ready: [], blocked: [], parked: [], deadlocked: [], attempts: { 'o/a:issue-3': 4 },
     inFlight: [{ key: 'IMPLEMENT:o/a:issue-1', number: 1, target: 'issue', role: 'implement', provider: 'anthropic', harness: 'claude-code', model: 'claude-opus-4-8', runId: 'run-x', startedAt: st.updatedAt, studentId: 'opus-1' }] };
   st.students = [{ id: 'opus-1', provider: 'anthropic', harness: 'claude-code', model: 'claude-opus-4-8', tier: 'opus', role: 'implement', state: 'busy', warm: true, baseSessionId: 'seed-1', repo: 'o/a', item: 1, runId: 'run-x', startedAt: st.updatedAt, tokens: 12000, cacheHitPct: 80 }];
-  st.providers = { anthropic: { inFlight: 1, cap: 4, quota: { provider: 'anthropic', state: 'available' }, halted: null } };
+  st.providers = { anthropic: { inFlight: 1, cap: 4, quota: { provider: 'anthropic', state: 'available' }, halted: null, rate: null } };
   p.writeStatus(st);
   // Not running as a child of THIS dashboard -> the snapshot is not trusted as live.
   let b = await get('/api/boards') as { repos: Array<{ fromEngine: boolean; inFlight: unknown[] }> };
@@ -143,4 +143,47 @@ test('bounded-run setting writes config and refuses an implicit unbounded run', 
   assert.equal(bad.status, 500);
   const ub = await post('/api/settings/bounded-run', { n: 0, unbounded: true }) as { boundedRun: { n: number; unbounded?: boolean } };
   assert.equal(ub.boundedRun.unbounded, true);
+});
+
+test('the burn view reads the ledger (truthful with the engine stopped) and the cap is set and cleared from the UI', async () => {
+  const { openLedger } = await import('@study-hall/harness');
+  const ledger = openLedger(join(stateDir, 'ledger'));
+  const now = Date.now();
+  ledger.recordRun({
+    schemaVersion: 2, runId: 'burn-1', ts: new Date(now - 5 * 60_000).toISOString(), startedAt: new Date(now - 10 * 60_000).toISOString(),
+    endedAt: new Date(now - 5 * 60_000).toISOString(), durationMs: 300_000, repo: 'o/a', item: 1, role: 'implement', provider: 'anthropic',
+    harness: 'claude-code', meter: 'subscription', fidelity: 'exact', inputTokens: 100_000, outputTokens: 10_000, cacheReadInputTokens: 400_000,
+    cacheCreationInputTokens: 0, reasoningTokens: 0, turns: 3, warmMechanism: 'cold', stoppedBy: null, estimatedCostUsd: 2, costBasis: 'list', pricingTableVersion: 'x',
+  });
+  ledger.close();
+
+  let b = await get('/api/burn') as { providers: Record<string, { rate: { tokens: { spent: number; cap: number | null }; capped: boolean }; source: string; limit: unknown; suggestedTokensPerHour: number | null; runsInWindow: number }>; windowMinutes: number };
+  assert.equal(b.windowMinutes, 60);
+  assert.equal(b.providers.anthropic.rate.tokens.spent, 510_000);
+  assert.equal(b.providers.anthropic.rate.tokens.cap, null, 'uncapped until the operator says otherwise');
+  assert.equal(b.providers.anthropic.rate.capped, false);
+  assert.equal(b.providers.anthropic.source, 'ledger', 'the engine is not running, and the view says so');
+  assert.equal(b.providers.anthropic.runsInWindow, 1);
+  assert.equal(b.providers.anthropic.suggestedTokensPerHour, 510_000, 'suggested from the busiest recent hour');
+
+  // Set a cap below what was just spent: the lane reads as resting at once.
+  const set = await post('/api/settings/rate-limit', { provider: 'anthropic', tokensPerHour: 400_000 }) as { ok: boolean; limit: { tokensPerHour: number }; note: string };
+  assert.equal(set.ok, true);
+  assert.equal(set.limit.tokensPerHour, 400_000);
+  assert.match(set.note, /next tick/);
+  assert.equal(JSON.parse(readFileSync(cfgFile, 'utf8')).provider.rateLimit.anthropic.tokensPerHour, 400_000);
+  b = await get('/api/burn') as typeof b;
+  assert.equal(b.providers.anthropic.rate.capped, true);
+  assert.equal(b.providers.openai?.rate.capped, false, 'the other lane is untouched');
+
+  // Zero clears it: an uncapped provider is the ABSENCE of a limit, not a limit of zero.
+  const cleared = await post('/api/settings/rate-limit', { provider: 'anthropic', tokensPerHour: 0 }) as { ok: boolean; limit: null };
+  assert.equal(cleared.limit, null);
+  assert.equal(JSON.parse(readFileSync(cfgFile, 'utf8')).provider.rateLimit.anthropic, undefined);
+  assert.equal((await get('/api/burn') as typeof b).providers.anthropic.rate.capped, false);
+
+  const bad = await fetch(s.url + '/api/settings/rate-limit', { method: 'POST', body: JSON.stringify({ provider: 'anthropic', tokensPerHour: -5 }), headers: { 'content-type': 'application/json' } });
+  assert.equal(bad.status, 500);
+  const noProvider = await fetch(s.url + '/api/settings/rate-limit', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+  assert.equal(noProvider.status, 500);
 });

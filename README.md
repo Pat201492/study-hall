@@ -18,3 +18,12 @@ Runs on Node ≥ 22.5 (`node:sqlite`), zero native dependencies, Windows-first, 
 PLAN_ROLE the dashboard uses, and prints the `claude mcp add` one-liner that registers the dashboard's
 planner tools. Drafts proposed there land in the Planner tab's staging store; filing stays behind the
 dashboard's confirm. Live findings: `docs/adr/ADR-004-planner-transports.md`.
+
+## Burn-rate governor
+
+Each provider can carry a ceiling on how many billed tokens it may spend in a sliding hour
+(Overview → Burn rate, or `POST /api/settings/rate-limit`). Cross it and that lane RESTS: with the
+provider toggle on Both the work fails over to the other service and comes back on its own when the
+window rolls forward. Off by default — the dashboard suggests a number from your own busiest recent
+hour, because a cap below it parks the board and one far above it never binds. Raising a cap lifts a
+rest on the engine's next tick; it never waits on a vendor reset. Design: `docs/adr/ADR-005-burn-rate-governor.md`.

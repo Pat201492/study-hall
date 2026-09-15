@@ -4,6 +4,7 @@ import type { LadderTallies } from '../assignments.js';
 import type { TestRunState } from '../testRun.js';
 import type { Tier } from '../tiers.js';
 import type { Role } from '../types.js';
+import type { RateVerdict } from '../rateBudget.js';
 
 // The engine-wide status snapshot the dashboard's Boards and Pool tabs read
 // (`<stateDir>/status.json`). One file for every board — v1 filed an aggregate
@@ -75,6 +76,8 @@ export interface ProviderStatus {
   cap: number;
   quota: QuotaSnapshot | null;
   halted: string | null;
+  /** The burn-rate governor's standing: null when this provider is uncapped. */
+  rate: RateVerdict | null;
 }
 
 export interface EngineStatus {

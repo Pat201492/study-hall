@@ -11,6 +11,7 @@ import type { Role } from './types.js';
 import type { IssueAuditGate } from './issueAudit.js';
 import type { Tier } from './tiers.js';
 import { normalizeRepo } from './repo.js';
+import { hasCap, type RateLimit } from './rateBudget.js';
 
 // Engine configuration. Reads the same `config.json` the dashboard reads (its
 // provider/port section lives in packages/dashboard/src/config.ts); this module
@@ -83,11 +84,26 @@ export interface ProviderSettings {
   perSurface: Partial<Record<string, string>>;
   handoverAt?: number;
   concurrency?: Record<string, number>;
+  /**
+   * Burn-rate ceiling per provider (rateBudget.ts): how much may be spent in a
+   * sliding hour before the engine rests that lane and fails over to the next.
+   *
+   * OFF by default. A cap nobody chose would silently park a board, and the
+   * right number is a fact about this account's window and this operator's
+   * appetite — the dashboard suggests one from the ledger's own busiest hours.
+   */
+  rateLimit?: Record<string, RateLimit>;
 }
 
 export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
-  default: 'anthropic', failoverOrder: ['anthropic', 'openai'], perSurface: {}, handoverAt: 0.9,
+  default: 'anthropic', failoverOrder: ['anthropic', 'openai'], perSurface: {}, handoverAt: 0.9, rateLimit: {},
 };
+
+/** The burn-rate ceiling in force for a provider, or undefined when uncapped. */
+export function rateLimitFor(cfg: Pick<EngineConfig, 'provider'>, provider: string): RateLimit | undefined {
+  const l = cfg.provider.rateLimit?.[provider];
+  return l && hasCap(l) ? l : undefined;
+}
 
 /** The provider choice for the board surface: its override, else the global default. */
 export function boardProviderChoice(cfg: Pick<EngineConfig, 'provider'>): string {
@@ -189,6 +205,7 @@ export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.
     provider: {
       ...DEFAULT_PROVIDER_SETTINGS, ...(raw.provider ?? {}),
       perSurface: { ...(raw.provider?.perSurface ?? {}) },
+      rateLimit: { ...(raw.provider?.rateLimit ?? {}) },
     },
   };
   if (env.STUDY_HALL_STATE_DIR) cfg.stateDir = env.STUDY_HALL_STATE_DIR;

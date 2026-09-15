@@ -298,3 +298,38 @@ test('a bounded run in PR units caps new IMPLEMENT dispatches at the units remai
   const merges = decide(boards, state({ boundedRemaining: 1, boundedUnit: 'merge', throttleLimit: 10 }), { ...cfg, maxConcurrent: 10 });
   assert.equal(dispatches(merges.decisions).length, 4);
 });
+
+test('a provider resting on its burn cap fails over; both resting holds the tick with a rate-capped reason', () => {
+  const boards = [board('o/r', { issues: [issue({ number: 1 })] })];
+  const resting = { anthropic: { reason: '1.1M tokens in the last 60 min (cap 1M)', resumesAt: 1_000_500 } };
+  const over = decide(boards, state({ rateCapped: resting }), cfg);
+  const d = dispatches(over.decisions);
+  assert.equal(d.length, 1);
+  assert.equal(d[0].provider, 'openai', 'the work goes to the other service');
+
+  // Every usable lane resting is ONE tick-level hold naming the soonest to
+  // resume — not N per-action "no slots", which would read as a pool problem.
+  const both = decide(boards, state({ rateCapped: { ...resting, openai: { reason: 'openai burn', resumesAt: 1_000_900 } } }), cfg);
+  assert.equal(dispatches(both.decisions).length, 0);
+  assert.equal(both.decisions.length, 1);
+  const h = holds(both.decisions)[0];
+  assert.equal(h.reason, 'rate-capped');
+  assert.equal(h.scope, 'tick');
+  assert.match(h.detail ?? '', /1.1M tokens/, 'the lane that comes back first');
+
+  // A resting provider offers no slots: the budget is sized for what can run.
+  assert.equal(slotBudget(cfg, state({ throttleLimit: 10, rateCapped: resting })), 2, 'only Codex capacity remains');
+  assert.equal(slotBudget(cfg, state({ throttleLimit: 10 })), 4, 'uncapped: the global ceiling binds, not the lanes');
+  assert.equal(slotBudget(cfg, state({ throttleLimit: 10, rateCapped: { ...resting, openai: { reason: 'x', resumesAt: null } } })), 0);
+});
+
+test('a pinned provider resting alone holds that action, naming the pace rather than the pool', () => {
+  const out = decide([board('o/r', { issues: [issue({ number: 1 })] })], state({
+    providerChoice: 'anthropic',
+    rateCapped: { anthropic: { reason: '1.1M tokens in the last 60 min (cap 1M)', resumesAt: 1_000_500 } },
+  }), cfg);
+  assert.equal(dispatches(out.decisions).length, 0);
+  const h = holds(out.decisions)[0];
+  assert.equal(h.reason, 'rate-capped');
+  assert.equal(h.scope, 'tick', 'a pinned lane is the only usable lane, so the whole tick rests');
+});

@@ -349,6 +349,28 @@ export class LedgerReader {
     return (this.stmt(sql).all(p) as Row[]).map(rowToQuota);
   }
 
+  /**
+   * One row per RUN in a window: when it landed, what it billed, what it cost.
+   *
+   * The burn-rate governor's input (core/rateBudget.ts). Per-sample rather than
+   * a SUM so the caller can age spend out of a sliding window and say WHEN a
+   * capped provider resumes — a bare total cannot answer that. `endedAt` is the
+   * moment the spend landed; a run that started before the window but finished
+   * inside it counts here, which is the conservative direction.
+   */
+  spendSamples(since: TimeLike, provider?: string): Array<{ provider: string; at: number; tokens: number; usd: number; runId: string }> {
+    const p: Record<string, Bindable> = { since: toIso(since) };
+    let sql = `SELECT runId, provider, endedAt,
+        (inputTokens + outputTokens + cacheReadInputTokens + cacheCreationInputTokens + reasoningTokens) AS tokens,
+        CASE WHEN fidelity = 'exact' THEN estimatedCostUsd ELSE 0 END AS usd
+      FROM runs WHERE endedAt >= :since`;
+    if (provider) { sql += ' AND provider = :provider'; p.provider = provider; }
+    sql += ' ORDER BY endedAt ASC';
+    return (this.stmt(sql).all(p) as Row[]).map((r) => ({
+      provider: String(r.provider), at: Date.parse(String(r.endedAt)), tokens: Number(r.tokens ?? 0), usd: Number(r.usd ?? 0), runId: String(r.runId),
+    })).filter((r) => Number.isFinite(r.at));
+  }
+
   /** Engine events, newest first. */
   events(filter: EventFilter = {}): EventRecord[] {
     const where: string[] = [];

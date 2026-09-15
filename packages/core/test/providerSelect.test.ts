@@ -47,3 +47,40 @@ test('auto: everything exhausted or halted yields no provider', () => {
   assert.equal(selectProvider(input({ quotas: { anthropic: q('exhausted'), openai: q('exhausted') } })).reason, 'all-exhausted');
   assert.equal(selectProvider(input({ halted: { anthropic: 'x', openai: 'y' } })).reason, 'all-exhausted');
 });
+
+test('a provider resting on its burn-rate cap is skipped in failover, and a pinned one holds with the reason', () => {
+  const rested = { anthropic: { reason: '1.2M tokens in the last 60 min (cap 1M)', resumesAt: 1_700_000_000_000 } };
+  // Auto: the capped lane is skipped and the work goes to the other service.
+  assert.deepEqual(selectProvider(input({ rateCapped: rested })), { provider: 'openai', reason: 'first-available' });
+  // Pinned: a pin says WHICH provider, not "spend without limit" — it holds.
+  const pinned = selectProvider(input({ choice: 'anthropic', rateCapped: rested }));
+  assert.equal(pinned.provider, null);
+  assert.equal(pinned.reason, 'pinned-but-rate-capped');
+  assert.match(pinned.detail ?? '', /1\.2M tokens/);
+  // The other provider is unaffected by a rest on the first.
+  assert.equal(selectProvider(input({ choice: 'openai', rateCapped: rested })).reason, 'pinned');
+});
+
+test('when every lane is resting, the reason says so and names the one that comes back first', () => {
+  const r = selectProvider(input({
+    rateCapped: {
+      anthropic: { reason: 'anthropic burn', resumesAt: 5_000 },
+      openai: { reason: 'openai burn', resumesAt: 1_000 },
+    },
+  }));
+  assert.equal(r.provider, null);
+  assert.equal(r.reason, 'all-rate-capped');
+  assert.match(r.detail ?? '', /^openai: openai burn/, 'the soonest to resume is the one worth reporting');
+});
+
+test('a rest outranks a concurrency cap in the report, and an unknown provider is still probed first', () => {
+  // Rest + at-cap together: the rest is the one an operator can lift.
+  assert.equal(selectProvider(input({
+    rateCapped: { anthropic: { reason: 'burn', resumesAt: null } }, inFlight: { openai: 2 },
+  })).reason, 'all-rate-capped');
+  // A provider nobody has observed is probed rather than declared rested.
+  assert.deepEqual(selectProvider(input({
+    quotas: { anthropic: q('unknown'), openai: q('available') },
+    rateCapped: { openai: { reason: 'burn', resumesAt: null } },
+  })), { provider: 'anthropic', reason: 'needs-probe', probe: 'anthropic' });
+});
