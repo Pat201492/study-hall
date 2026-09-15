@@ -28,15 +28,29 @@ export interface RepoClone {
 
 // Ensure a local clone exists and its base branch is current with origin.
 // Idempotent: clones on first call, fast-forwards on later calls.
+export interface GitIdentity { name: string; email: string }
+
+/** The committer identity for student commits: the configured one, else the
+ *  user's global git config. No literal lives here — the repo is reusable by
+ *  anyone, and the arena labels commits per lane. */
+export async function resolveIdentity(configured?: GitIdentity): Promise<GitIdentity> {
+  if (configured?.name && configured?.email) return configured;
+  const read = (key: string): Promise<string> => execFileAsync('git', ['config', '--global', '--get', key]).then((r) => r.stdout.trim(), () => '');
+  const [name, email] = await Promise.all([read('user.name'), read('user.email')]);
+  if (!name || !email) throw new Error('no git identity: set `gitIdentity` in config.json or `git config --global user.name/user.email`');
+  return { name: configured?.name || name, email: configured?.email || email };
+}
+
 export async function ensureClone(
   url: string, dir: string, base = 'master',
-  identity = { name: 'Pat201492', email: 'pegan604@gmail.com' },
+  identity?: GitIdentity,
 ): Promise<RepoClone> {
+  const who = await resolveIdentity(identity);
   if (!existsSync(join(dir, '.git'))) {
     await execFileAsync('git', ['clone', url, dir], { maxBuffer: 20 * 1024 * 1024 });
   }
-  await git(dir, ['config', 'user.name', identity.name]);
-  await git(dir, ['config', 'user.email', identity.email]);
+  await git(dir, ['config', 'user.name', who.name]);
+  await git(dir, ['config', 'user.email', who.email]);
   // Resolve the real base branch: honor `base` only if it exists on origin,
   // otherwise fall back to origin's default branch (main vs master, etc.).
   base = await resolveBase(dir, base);
