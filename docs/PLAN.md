@@ -369,3 +369,18 @@ whether `account/rateLimits/read` needs `experimentalApi`; Anthropic Agent-SDK-c
 Modifying or restarting v1; Gemini/Antigravity (no compliant headless path today); Amp (WSL-only);
 Docker isolation on Windows (worktrees + per-trial ports suffice at this scale); a hosted/multi-user
 version (policy forbids intermediating subscription auth).
+
+---
+
+## Status — 2026-09-15 (end of build day)
+
+Built and green (`npm test`: 891 in study-hall, 38 in study-arena; `npm run typecheck` clean in both):
+
+- **Phase 0–1**: spikes (ADR-000/001), `@study-hall/harness` (contract, claude-code / codex / opencode adapters, warm slots, quota monitors, ledger, pricing).
+- **Phase 2**: engine (`packages/core/src/engine/`: boardCycle, governance, persistence + status, roleRunner for every role, reporting, heartbeat; `index.ts --live|--once`). Real boot smoke: clone, both preflights, blackout hold, status.json.
+- **Phase 3**: dashboard tabs Overview (quota + engine controls + bounded run), Boards, Pool, Runs, Settings; engine owned as a ManagedProcess child; logon Scheduled Task `StudyHall` installed and serving :4800.
+- **Phase 4**: Planner (MCP tools, Claude stream-json + Codex resume-loop verified live, resume with event replay, `/plan-feature` skill installer). ADR-004.
+- **Phase 5**: study-arena — export envelope, corpus builder + validator (dungeonworks: 101 items), trial runner + sweep gate, three-tier graders + audit, metrics + paired bootstrap, pre-registration + verdict report; Arena tab reads the envelope. The $0 smoke (#6) is next; the Claude control arm (#9) and Codex arm (#10) wait for a quiet quota window and a paid plan.
+- **Phase 6**: Editor and Admissions ported behind the provider toggle (#17). Cutover (#18) waits for the go.
+
+Issue references: study-hall #1–#18 (open: #8 logon check, #18 cutover), study-arena #1–#10 (open: #6, #9, #10).
