@@ -5,6 +5,7 @@ import type { TestRunState } from '../testRun.js';
 import type { Tier } from '../tiers.js';
 import type { Role } from '../types.js';
 import type { RateVerdict } from '../rateBudget.js';
+import type { PaceVerdict } from '../windowPace.js';
 
 // The engine-wide status snapshot the dashboard's Boards and Pool tabs read
 // (`<stateDir>/status.json`). One file for every board — v1 filed an aggregate
@@ -78,6 +79,8 @@ export interface ProviderStatus {
   halted: string | null;
   /** The burn-rate governor's standing: null when this provider is uncapped. */
   rate: RateVerdict | null;
+  /** Window pacing's standing: null when it is off for this provider. */
+  pace: PaceVerdict | null;
 }
 
 export interface EngineStatus {

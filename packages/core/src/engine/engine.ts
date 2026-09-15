@@ -11,8 +11,9 @@ import { Persistence, type RepoMemory } from './persistence.js';
 import { runRole as realRunRole, realGit, realGitHub, RoleRunError, type GitPort, type GitHubPort, type RoleRunOutput, type RoleRunInput, type RunnerDeps, type DispatchDecision } from './roleRunner.js';
 import { Reporter, watchdogReport, wedgedReport, contestedReport, killReport, type ReportPort } from './reporting.js';
 import { STATUS_SCHEMA, type EngineStatus, type RepoStatus, type StudentStatus, type InFlightRef } from './status.js';
-import { boardProviderChoice, rateLimitFor, type EngineConfig } from '../config.js';
+import { boardProviderChoice, rateLimitFor, paceFor, type EngineConfig } from '../config.js';
 import { billedTokens, RateTracker, type RateVerdict } from '../rateBudget.js';
+import { assessPace, paceSamples, DEFAULT_PACE, type PaceSample, type PaceVerdict } from '../windowPace.js';
 import { classify, isParked, parkedItems, deadlockedPulls, pullIssueNumber, type BoardAction } from '../classify.js';
 import { issuesToTaskMap, specFingerprint, type RawIssue, type OpenPull } from '../github.js';
 import * as gh from '../github.js';
@@ -164,6 +165,7 @@ export class Engine {
   /** Burn-rate governor, one per provider; only capped providers get a tracker. */
   private readonly rate = new Map<string, RateTracker>();
   private readonly rateResting = new Map<string, number | null>();
+  private readonly restingReason = new Map<string, string>();
   readonly assignments = new AssignmentLog();
   private readonly reporter: Reporter;
   private readonly log: EngineLog;
@@ -292,28 +294,55 @@ export class Engine {
     }
   }
 
-  /** Providers resting on their own cap this tick, with transitions logged once. */
-  private assessRates(now: number): { capped: Record<string, { reason: string; resumesAt: number | null } | undefined>; verdicts: Record<string, RateVerdict> } {
+  /** Window pacing for one provider, from the utilization the provider itself reported. */
+  private assessPaceFor(provider: string, now: number): PaceVerdict | null {
+    const opts = paceFor(this.cfg, provider);
+    if (!opts) return null;
+    const lookback = opts.lookbackMs ?? DEFAULT_PACE.lookbackMs;
+    let samples: PaceSample[] = [];
+    try { samples = paceSamples(this.ledger.reader.quotaHistory(provider, new Date(now - lookback))); }
+    catch (e) { this.log.warn(`${provider}: could not read quota history for pacing: ${(e as Error).message}`); }
+    return assessPace(provider, samples, now, opts);
+  }
+
+  /**
+   * Providers resting this tick, with transitions logged once.
+   *
+   * Two governors, one seam: the fixed burn cap (rateBudget) and window pacing
+   * (windowPace). Either resting rests the lane, and when both speak the reason
+   * carries both — an operator raising one number should not be surprised that
+   * the other still holds.
+   */
+  private assessRates(now: number): { capped: Record<string, { reason: string; resumesAt: number | null } | undefined>; verdicts: Record<string, RateVerdict>; paces: Record<string, PaceVerdict> } {
     const capped: Record<string, { reason: string; resumesAt: number | null } | undefined> = {};
     const verdicts: Record<string, RateVerdict> = {};
-    for (const [id, tracker] of this.rate) {
-      const v = tracker.assess(now);
-      verdicts[id] = v;
-      const was = this.rateResting.has(id);
-      if (v.capped) {
-        capped[id] = { reason: v.reason ?? 'burn-rate cap reached', resumesAt: v.resumesAt };
-        if (!was) {
-          this.rateResting.set(id, v.resumesAt);
-          this.log.warn(`${id}: RESTING on its burn cap — ${v.reason}${v.resumesAt ? `; resumes ${new Date(v.resumesAt).toLocaleTimeString()}` : ' (waiting on in-flight work to finish)'}`);
-          this.event({ level: 'warn', event: 'provider.rate-capped', reason: v.reason, data: { provider: id, spent: v.tokens.spent, cap: v.tokens.cap, resumesAt: v.resumesAt, inFlightTokens: v.inFlightTokens } });
+    const paces: Record<string, PaceVerdict> = {};
+    const cfg = this.cfg;
+    for (const id of new Set([...this.rate.keys(), ...cfg.provider.failoverOrder, ...Object.keys(cfg.pools)])) {
+      const v = this.rate.get(id)?.assess(now) ?? null;
+      const p = this.assessPaceFor(id, now);
+      if (v) verdicts[id] = v;
+      if (p) paces[id] = p;
+      const reasons = [v?.capped ? v.reason : null, p?.capped ? p.reason : null].filter((r): r is string => !!r);
+      const resting = reasons.length > 0;
+      const was = this.rateResting.get(id);
+      if (resting) {
+        const reason = reasons.join('; ');
+        capped[id] = { reason, resumesAt: v?.capped ? v.resumesAt : null };
+        if (was === undefined || this.restingReason.get(id) !== reason) {
+          this.rateResting.set(id, capped[id]!.resumesAt);
+          this.restingReason.set(id, reason);
+          this.log.warn(`${id}: RESTING — ${reason}${capped[id]!.resumesAt ? `; resumes ${new Date(capped[id]!.resumesAt!).toLocaleTimeString()}` : ''}`);
+          this.event({ level: 'warn', event: 'provider.rate-capped', reason, data: { provider: id, spent: v?.tokens.spent ?? null, cap: v?.tokens.cap ?? null, resumesAt: capped[id]!.resumesAt, inFlightTokens: v?.inFlightTokens ?? 0, paceRatio: p?.limiting?.ratio ?? null, window: p?.limiting?.window ?? null } });
         }
-      } else if (was) {
+      } else if (was !== undefined) {
         this.rateResting.delete(id);
-        this.log.ok(`${id}: burn back under the cap (${Math.round(v.tokens.spent / 1000)}k of ${Math.round((v.tokens.cap ?? 0) / 1000)}k this window) — dispatching again`);
-        this.event({ level: 'info', event: 'provider.rate-resumed', data: { provider: id, spent: v.tokens.spent, cap: v.tokens.cap } });
+        this.restingReason.delete(id);
+        this.log.ok(`${id}: back under its limits${v ? ` (${Math.round(v.tokens.spent / 1000)}k of ${Math.round((v.tokens.cap ?? 0) / 1000)}k this window)` : ''} — dispatching again`);
+        this.event({ level: 'info', event: 'provider.rate-resumed', data: { provider: id, spent: v?.tokens.spent ?? null, cap: v?.tokens.cap ?? null } });
       }
     }
-    return { capped, verdicts };
+    return { capped, verdicts, paces };
   }
 
   private async seedRejections(rt: RepoRuntime, pulls: OpenPull[]): Promise<void> {
@@ -946,6 +975,7 @@ export class Engine {
         quota: this.opts.ports.harnesses.quotaFor(id)?.snapshot(now) ?? null,
         halted: halted[id] ?? null,
         rate: this.rate.get(id)?.assess(now) ?? null,
+        pace: this.assessPaceFor(id, now),
       };
     }
     const pause = this.gov.dispatchPause(now);

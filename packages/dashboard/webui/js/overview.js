@@ -106,6 +106,16 @@ function burnCard(id, b, windowMinutes, fmt) {
   const resting = r.capped
     ? `<div class="bad" style="margin-top:4px">${fmt.esc(r.reason ?? '')}${r.resumesAt ? ` — resumes ${new Date(r.resumesAt).toLocaleTimeString()}` : ' — waiting on in-flight work'}</div>`
     : '';
+  // Window pacing: the provider's own utilization, and when it runs out at this burn.
+  const p = b.pace;
+  const w = p?.limiting;
+  const paceLine = !b.paceEnabled
+    ? `<div class="kv" style="margin-top:6px"><span class="muted">pace to the provider's own window</span><button class="btn" data-pace="${id}" data-on="1">Enable</button></div>`
+    : `<div class="kv" style="margin-top:6px"><span>${w ? `${w.window === 'fiveHour' ? '5-hour' : w.window === 'sevenDay' ? '7-day' : w.window} window ${Math.round(w.utilization * 100)}% used` : 'window pacing on'}</span>
+         <span>${w?.projectedExhaustionAt
+           ? `<span class="${p.capped ? 'bad' : 'ok'}">runs out ${new Date(w.projectedExhaustionAt).toLocaleTimeString()}</span> <span class="muted">vs reset ${new Date(w.resetsAt).toLocaleTimeString()}</span>`
+           : `<span class="muted">${fmt.esc(p?.note ?? 'measuring…')}</span>`}
+         <button class="btn" data-pace="${id}" data-on="0">Off</button></span></div>`;
   const suggest = b.suggestedTokensPerHour
     ? `<div class="muted" style="font-size:12px;margin-top:4px">Busiest recent hour on this lane: ${fmt.tok(b.suggestedTokensPerHour)} tokens. A cap below that parks the board; well above it never binds.</div>`
     : '<div class="muted" style="font-size:12px;margin-top:4px">No history on this lane yet — run something first, or set a cap you are comfortable with.</div>';
@@ -117,6 +127,7 @@ function burnCard(id, b, windowMinutes, fmt) {
       <input type="number" min="0" step="50" style="width:84px" data-cap="${id}" value="${cap ? Math.round(cap / 1000) : 0}"> <span class="muted">k tokens / hour</span>
       <button class="btn" data-savecap="${id}">Save</button></span></div>
     <div class="muted" style="font-size:12px">0 = uncapped. Takes effect on the engine's next tick.</div>
+    ${paceLine}
     ${suggest}
     <span class="muted" id="cap-msg-${id}"></span>
   </div>`;
@@ -137,6 +148,14 @@ export function wireBurn(el, { api, fmt }) {
       msg.textContent = 'saving…';
       const r = await api.post('/api/settings/rate-limit', { provider: id, tokensPerHour: k > 0 ? k * 1000 : 0 });
       msg.textContent = r.ok ? (r.limit ? `capped at ${k}k/hour — ${r.note}` : 'uncapped') : (r.msg || 'failed');
+      await load();
+    }));
+    box.querySelectorAll('button[data-pace]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.pace;
+      const msg = box.querySelector(`#cap-msg-${id}`);
+      msg.textContent = 'saving…';
+      const r = await api.post('/api/settings/pace', { provider: id, enabled: b.dataset.on === '1' });
+      msg.textContent = r.ok ? (r.enabled ? `paced to its own window — ${r.note}` : 'window pacing off') : (r.msg || 'failed');
       await load();
     }));
   }

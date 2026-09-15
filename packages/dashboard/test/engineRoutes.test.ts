@@ -66,7 +66,7 @@ test('boards: the engine view (in-flight, attempts, contested) merges in when th
   st.repos['o/a'] = { repo: 'o/a', contested: true, ready: [], blocked: [], parked: [], deadlocked: [], attempts: { 'o/a:issue-3': 4 },
     inFlight: [{ key: 'IMPLEMENT:o/a:issue-1', number: 1, target: 'issue', role: 'implement', provider: 'anthropic', harness: 'claude-code', model: 'claude-opus-4-8', runId: 'run-x', startedAt: st.updatedAt, studentId: 'opus-1' }] };
   st.students = [{ id: 'opus-1', provider: 'anthropic', harness: 'claude-code', model: 'claude-opus-4-8', tier: 'opus', role: 'implement', state: 'busy', warm: true, baseSessionId: 'seed-1', repo: 'o/a', item: 1, runId: 'run-x', startedAt: st.updatedAt, tokens: 12000, cacheHitPct: 80 }];
-  st.providers = { anthropic: { inFlight: 1, cap: 4, quota: { provider: 'anthropic', state: 'available' }, halted: null, rate: null } };
+  st.providers = { anthropic: { inFlight: 1, cap: 4, quota: { provider: 'anthropic', state: 'available' }, halted: null, rate: null, pace: null } };
   p.writeStatus(st);
   // Not running as a child of THIS dashboard -> the snapshot is not trusted as live.
   let b = await get('/api/boards') as { repos: Array<{ fromEngine: boolean; inFlight: unknown[] }> };
@@ -186,4 +186,42 @@ test('the burn view reads the ledger (truthful with the engine stopped) and the 
   assert.equal(bad.status, 500);
   const noProvider = await fetch(s.url + '/api/settings/rate-limit', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
   assert.equal(noProvider.status, 500);
+});
+
+test('window pacing is set from the UI, and the burn view shows the projected exhaustion whether or not the engine runs', async () => {
+  const { openLedger } = await import('@study-hall/harness');
+  const ledger = openLedger(join(stateDir, 'ledger'));
+  const now = Date.now();
+  // Half the five-hour window used, two hours left, climbing 0.2 in thirty minutes.
+  for (let i = 0; i <= 5; i++) {
+    ledger.recordQuota({ provider: 'anthropic', observedAt: now - 30 * 60_000 + i * 6 * 60_000, source: 'stream', fiveHour: { utilization: 0.3 + i * 0.04, resetsAt: now + 2 * 60 * 60_000 } });
+  }
+  ledger.close();
+
+  // Off by default: no verdict at all, and the lane is not rested.
+  let b = await get('/api/burn') as { providers: Record<string, { pace: { capped: boolean; limiting: { window: string; projectedExhaustionAt: number; utilization: number } | null; note: string | null } | null; paceEnabled: boolean }> };
+  assert.equal(b.providers.anthropic.pace, null);
+  assert.equal(b.providers.anthropic.paceEnabled, false);
+
+  const on = await post('/api/settings/pace', { provider: 'anthropic', enabled: true }) as { ok: boolean; enabled: boolean; note: string };
+  assert.equal(on.ok, true);
+  assert.match(on.note, /next tick/);
+  assert.equal(JSON.parse(readFileSync(cfgFile, 'utf8')).provider.pace.anthropic.enabled, true);
+
+  b = await get('/api/burn') as typeof b;
+  const p = b.providers.anthropic.pace!;
+  assert.equal(b.providers.anthropic.paceEnabled, true);
+  assert.equal(p.capped, true, 'burning 1.6x what the remaining window affords');
+  assert.equal(p.limiting?.window, 'fiveHour');
+  assert.ok(Math.abs(p.limiting!.utilization - 0.5) < 0.001);
+  assert.ok(p.limiting!.projectedExhaustionAt < now + 2 * 60 * 60_000, 'it runs out before the window resets');
+  assert.equal(b.providers.openai.pace, null, 'the other lane is untouched');
+
+  // A tolerance below 1 is refused; turning it off removes the entry entirely.
+  const bad = await fetch(s.url + '/api/settings/pace', { method: 'POST', body: JSON.stringify({ provider: 'anthropic', enabled: true, tolerance: 0.5 }), headers: { 'content-type': 'application/json' } });
+  assert.equal(bad.status, 500);
+  const off = await post('/api/settings/pace', { provider: 'anthropic', enabled: false }) as { enabled: boolean };
+  assert.equal(off.enabled, false);
+  assert.equal(JSON.parse(readFileSync(cfgFile, 'utf8')).provider.pace.anthropic, undefined);
+  assert.equal((await get('/api/burn') as typeof b).providers.anthropic.pace, null);
 });

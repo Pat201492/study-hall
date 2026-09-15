@@ -12,6 +12,7 @@ import type { IssueAuditGate } from './issueAudit.js';
 import type { Tier } from './tiers.js';
 import { normalizeRepo } from './repo.js';
 import { hasCap, type RateLimit } from './rateBudget.js';
+import type { PaceOptions } from './windowPace.js';
 
 // Engine configuration. Reads the same `config.json` the dashboard reads (its
 // provider/port section lives in packages/dashboard/src/config.ts); this module
@@ -93,6 +94,12 @@ export interface ProviderSettings {
    * appetite — the dashboard suggests one from the ledger's own busiest hours.
    */
   rateLimit?: Record<string, RateLimit>;
+  /**
+   * Pace each provider from ITS OWN reported window (windowPace.ts) instead of
+   * a number the operator has to guess. Off by default; when both this and a
+   * `rateLimit` are set, the stricter one binds.
+   */
+  pace?: Record<string, PaceOptions>;
 }
 
 export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
@@ -103,6 +110,12 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
 export function rateLimitFor(cfg: Pick<EngineConfig, 'provider'>, provider: string): RateLimit | undefined {
   const l = cfg.provider.rateLimit?.[provider];
   return l && hasCap(l) ? l : undefined;
+}
+
+/** Window pacing in force for a provider, or undefined when it is off. */
+export function paceFor(cfg: Pick<EngineConfig, 'provider'>, provider: string): PaceOptions | undefined {
+  const p = cfg.provider.pace?.[provider];
+  return p?.enabled ? p : undefined;
 }
 
 /** The provider choice for the board surface: its override, else the global default. */
@@ -206,6 +219,7 @@ export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.
       ...DEFAULT_PROVIDER_SETTINGS, ...(raw.provider ?? {}),
       perSurface: { ...(raw.provider?.perSurface ?? {}) },
       rateLimit: { ...(raw.provider?.rateLimit ?? {}) },
+      pace: { ...(raw.provider?.pace ?? {}) },
     },
   };
   if (env.STUDY_HALL_STATE_DIR) cfg.stateDir = env.STUDY_HALL_STATE_DIR;

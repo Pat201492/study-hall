@@ -367,3 +367,58 @@ test('burn-rate governor: with every lane capped the tick holds and nothing is d
   assert.equal(st.lastTick?.dispatched, 0);
   r.ledger.close();
 });
+
+test('window pacing: a lane burning its own five-hour window too fast is rested and the work fails over', async () => {
+  const NOW = 1_700_000_000_000;
+  const r = rig({
+    boards: { 'o/a': { issues: [issue(1)], pulls: [] } },
+    config: { provider: { default: 'auto', failoverOrder: ['anthropic', 'openai'], perSurface: {}, pace: { anthropic: { enabled: true } } } },
+  });
+  await r.engine.boot();
+  // Half the window used with two hours left, climbing 0.2 in thirty minutes:
+  // 1.6x what the remaining time affords.
+  for (let i = 0; i <= 5; i++) {
+    r.ledger.recordQuota({
+      provider: 'anthropic', observedAt: NOW - 30 * 60_000 + i * 6 * 60_000, source: 'stream',
+      fiveHour: { utilization: 0.3 + i * 0.04, resetsAt: NOW + 2 * 60 * 60_000 },
+    });
+  }
+  await r.engine.tick();
+  await settle();
+  assert.deepEqual(r.calls.filter((c) => c.startsWith('run')), ['run implement o/a#1 on openai'], 'Claude is paced, so the work goes to ChatGPT');
+  const st = r.engine.snapshot();
+  assert.equal(st.providers.anthropic.pace?.capped, true);
+  assert.equal(st.providers.anthropic.pace?.limiting?.window, 'fiveHour');
+  assert.ok((st.providers.anthropic.pace?.limiting?.ratio ?? 0) > 1.25);
+  assert.equal(st.providers.anthropic.rate, null, 'no fixed cap is set: pacing alone rested it');
+  assert.equal(st.providers.openai.pace, null, 'pacing is off for the other lane');
+  const capped = r.ledger.reader.events({ limit: 50 }).find((e) => e.event === 'provider.rate-capped');
+  assert.match(capped?.reason ?? '', /5-hour window 5\d % used and burning/);
+  r.ledger.close();
+});
+
+test('window pacing: a lane burning slowly enough to last is never rested, and no observations means no verdict', async () => {
+  const NOW = 1_700_000_000_000;
+  const r = rig({ config: { provider: { default: 'auto', failoverOrder: ['anthropic', 'openai'], perSurface: {}, pace: { anthropic: { enabled: true } } } } });
+  await r.engine.boot();
+  // No observations at all: the lane must still dispatch — silence is not a block.
+  await r.engine.tick();
+  await settle();
+  assert.deepEqual(r.calls.filter((c) => c.startsWith('run')), ['run implement o/a#1 on anthropic']);
+  assert.equal(r.engine.snapshot().providers.anthropic.pace?.capped, false);
+  assert.match(r.engine.snapshot().providers.anthropic.pace?.note ?? '', /no usable window observation/);
+
+  // Now a slow burn: 0.05 in thirty minutes with two hours left is affordable.
+  for (let i = 0; i <= 5; i++) {
+    r.ledger.recordQuota({
+      provider: 'anthropic', observedAt: NOW - 30 * 60_000 + i * 6 * 60_000, source: 'stream',
+      fiveHour: { utilization: 0.45 + i * 0.01, resetsAt: NOW + 2 * 60 * 60_000 },
+    });
+  }
+  r.boards['o/a'].issues.push(issue(2));
+  await r.engine.tick();
+  await settle();
+  assert.ok(r.calls.filter((c) => c.startsWith('run')).includes('run implement o/a#2 on anthropic'), 'still dispatching on Claude');
+  assert.equal(r.engine.snapshot().providers.anthropic.pace?.capped, false);
+  r.ledger.close();
+});

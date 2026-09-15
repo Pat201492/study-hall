@@ -63,3 +63,30 @@ on the next tick — an operator never has to wait on a vendor reset to undo the
   conflict; the operator resolves it by switching the surface to Both or raising the cap.
 - A cap is not a quota: it knows nothing about the vendor's actual window. Deriving the pace from
   the provider's own utilization slope is the follow-up (study-hall #20).
+
+---
+
+## Addendum — window pacing landed (#20, same day)
+
+`core/windowPace.ts` is the second governor the "Consequences" section asked for, feeding the same
+`rateCapped` seam: one failover path, one hold reason, one thing to explain.
+
+It reads the utilization the provider itself reports (already in the ledger's `quota_observations`),
+measures how fast that number is climbing over a trailing window, and compares it with what the time
+remaining affords: `sustainable = (1 - utilization) / (resetsAt - now)`. Burning more than
+`tolerance` (default 1.25) times that rests the lane, with a reason that names the window, the
+percentage used and how early it would run out.
+
+Four refusals to guess, each with a test:
+
+- **Under five minutes of observations produces no verdict.** Two readings seconds apart can show
+  any slope at all; one long turn landing is a step change, not a trend.
+- **A utilization DROP means the window rolled over.** Everything before it describes a window that
+  no longer exists and is discarded, so a reset never reads as a burn.
+- **The tail of a window is noise**, so a window resetting within five minutes is skipped.
+- **No observation is not permission and not a block.** It returns `capped: false` with a `note`
+  saying why, and whatever fixed cap exists still binds.
+
+The fastest-burning window binds when several are reported (Claude's five-hour and seven-day, Codex's
+30-day), and both governors can speak at once: the reason carries both, so raising one number does
+not silently leave the other holding.

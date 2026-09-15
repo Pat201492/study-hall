@@ -9,6 +9,7 @@ import { classify, isParked, parkedItems, deadlockedPulls, pullIssueNumber, PARK
 import { fetchIssues, listOpenPulls, removeLabel, parseDeps, repoSlug, type RawIssue, type OpenPull } from '@study-hall/core/github';
 import { loadEngineConfig } from '@study-hall/core/config';
 import { assessRate, hasCap, resolveLimit, suggestTokensPerHour, DEFAULT_WINDOW_MS, type RateLimit } from '@study-hall/core/rateBudget';
+import { assessPace, paceSamples, DEFAULT_PACE } from '@study-hall/core/windowPace';
 import { requestDrain, clearDrain, drainRequested } from '@study-hall/core/drain';
 import type { Router } from './router.js';
 import { configPath, mutateConfig, type StudyHallConfig } from './config.js';
@@ -131,6 +132,7 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     const c = deps.cfg();
     const v = view();
     const now2 = now();
+    const ecfg = loadEngineConfig(configPath());
     const limits = c.provider.rateLimit ?? {};
     const ids = [...new Set([...c.provider.failoverOrder, ...Object.keys(limits), ...Object.keys(c.provider.concurrency ?? {})])];
     const windowMs = Math.max(...ids.map((id) => resolveLimit(limits[id]).windowMs), DEFAULT_WINDOW_MS);
@@ -141,12 +143,22 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
       const limit = limits[id];
       const fromLedger = assessRate(id, mine, [], limit, now2);
       const fromEngine = v.live ? v.status?.providers?.[id]?.rate ?? null : null;
+      // Window pacing reads the provider's own utilization history, which the
+      // ledger holds either way — so the projected exhaustion is shown whether
+      // or not the engine is up.
+      const paceOpts = ecfg.provider.pace?.[id];
+      const pace = paceOpts?.enabled
+        ? (v.live ? v.status?.providers?.[id]?.pace ?? null : null)
+          ?? assessPace(id, paceSamples(deps.ledger.reader.quotaHistory(id, new Date(now2 - (paceOpts.lookbackMs ?? DEFAULT_PACE.lookbackMs)))), now2, paceOpts)
+        : null;
       providers[id] = {
         // The engine's verdict wins while it is live (it sees in-flight burn);
         // the ledger's is the floor and the only reading when the engine is down.
         rate: fromEngine ?? fromLedger,
+        pace,
         source: fromEngine ? 'engine' : 'ledger',
         limit: limit ?? null,
+        paceEnabled: !!paceOpts?.enabled,
         suggestedTokensPerHour: suggestTokensPerHour(mine, now2, resolveLimit(limit).windowMs),
         runsInWindow: mine.filter((s) => s.at > now2 - resolveLimit(limit).windowMs).length,
       };
@@ -184,6 +196,25 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     });
     deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: 'settings.rate-limit', reason: cleared ? `${provider}: uncapped` : `${provider}: ${next.tokensPerHour ?? 0} tokens/window` });
     return { ok: true, provider, limit: cleared ? null : next, note: 'the engine picks this up on its next tick — no restart needed' };
+  });
+
+  router.post('/api/settings/pace', (ctx) => {
+    const { provider, enabled, tolerance } = ctx.body as { provider?: unknown; enabled?: unknown; tolerance?: unknown };
+    if (typeof provider !== 'string' || !provider) throw new Error('provider is required');
+    if (typeof enabled !== 'boolean') throw new Error('enabled must be true or false');
+    let tol: number | undefined;
+    if (tolerance !== undefined && tolerance !== null && tolerance !== '') {
+      tol = Number(tolerance);
+      if (!Number.isFinite(tol) || tol < 1) throw new Error('tolerance must be at least 1 (1 = rest the moment the burn would end the window early)');
+    }
+    mutateConfig(configPath(), (raw) => {
+      const p = (raw.provider ??= {}) as Record<string, unknown>;
+      const pace = (p.pace ??= {}) as Record<string, unknown>;
+      if (!enabled) delete pace[provider];
+      else pace[provider] = { enabled: true, ...(tol != null ? { tolerance: tol } : {}) };
+    });
+    deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: 'settings.pace', reason: `${provider}: ${enabled ? `paced to its own window${tol != null ? ` (tolerance ${tol})` : ''}` : 'pacing off'}` });
+    return { ok: true, provider, enabled, tolerance: tol ?? null, note: 'the engine picks this up on its next tick — no restart needed' };
   });
 
   // ---- boards ------------------------------------------------------------------------

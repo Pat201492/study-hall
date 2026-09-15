@@ -27,3 +27,8 @@ provider toggle on Both the work fails over to the other service and comes back 
 window rolls forward. Off by default — the dashboard suggests a number from your own busiest recent
 hour, because a cap below it parks the board and one far above it never binds. Raising a cap lifts a
 rest on the engine's next tick; it never waits on a vendor reset. Design: `docs/adr/ADR-005-burn-rate-governor.md`.
+
+Two governors feed that one rest: the fixed cap above, and **window pacing** (Overview → Enable),
+which reads the utilization the provider itself reports and rests the lane when it is burning its
+own five-hour or seven-day window faster than the remaining time affords. The burn card shows when
+the window runs out at the current rate against when it resets. The stricter of the two binds.
