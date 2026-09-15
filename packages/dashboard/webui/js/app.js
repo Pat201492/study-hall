@@ -4,6 +4,8 @@ import { renderOverview } from './overview.js';
 import { renderRuns } from './runs.js';
 import { renderSettings } from './settings.js';
 import { renderPlanner } from './planner.js';
+import { renderBoards } from './boards.js';
+import { renderPool } from './pool.js';
 
 /** @typedef {'anthropic'|'openai'|'auto'} ProviderChoice */
 
@@ -79,8 +81,8 @@ const screens = {
   overview: renderOverview,
   runs: renderRuns,
   settings: renderSettings,
-  boards: (el) => { el.innerHTML = '<div class="empty">Boards land with the engine port (phase 2).</div>'; },
-  pool: (el) => { el.innerHTML = '<div class="empty">Pool lands with the engine port (phase 2).</div>'; },
+  boards: renderBoards,
+  pool: renderPool,
   planner: renderPlanner,
   arena: (el) => { el.innerHTML = '<div class="empty">Arena report viewer lands with study-arena (phase 5).</div>'; },
 };

@@ -9,6 +9,7 @@ import {
 import { Router, type SseStream } from './router.js';
 import { serveStatic } from './static.js';
 import { mountPlanner } from './plannerRoutes.js';
+import { mountEngine, type BoardGitHub } from './engineRoutes.js';
 import {
   configPath, isProviderChoice, isSurface, loadConfig, mutateConfig, providerFor, SURFACES, type StudyHallConfig,
 } from './config.js';
@@ -28,6 +29,10 @@ export interface ServerDeps {
   ledger?: Ledger;
   /** Skip starting the Codex app-server (tests). */
   startCodexQuota?: boolean;
+  /** Board fetch/label port (tests fake GitHub). */
+  github?: BoardGitHub;
+  /** The command the engine child runs (tests use a sleeper). */
+  engineCommand?: { command: string; args: string[] };
 }
 
 export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Ledger; cfg: () => StudyHallConfig; stop: () => void } {
@@ -61,6 +66,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
 
   const router = new Router();
   const planner = mountPlanner(router, { cfg, ledger, baseUrl: () => `http://127.0.0.1:${cfg().port}` });
+  const engine = mountEngine(router, { cfg, ledger, github: deps.github, engineCommand: deps.engineCommand });
 
   router.get('/api/health', () => ({ ok: true, version: VERSION, uptimeMs: Date.now() - bootedAt }));
 
@@ -73,7 +79,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
       harnesses: BUILTIN_HARNESSES.map((h) => ({ id: h.id, provider: h.provider, capabilities: h.capabilities })),
       provider: { ...c.provider, effective: Object.fromEntries(SURFACES.map((s) => [s, providerFor(c, s)])) },
       repos: c.repos,
-      engine: { running: false, note: 'engine process lands in phase 2' },
+      engine: (() => { const v = engine.view(); const s = v.status; return { running: v.running, live: v.live, tick: s?.tick ?? 0, stopped: s?.stopped ?? false, updatedAt: s?.updatedAt ?? null, boundedRun: s?.boundedRun ?? null, lastTick: s?.lastTick ?? null, drainRequested: v.drainRequested, students: v.live ? s!.students.length : 0 }; })(),
       ledger: { dir: ledger.dir },
     };
   });
@@ -173,6 +179,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
   });
 
   const stop = (): void => {
+    engine.stop();
     void planner.stop();
     for (const u of unsubscribe) u();
     for (const s of quotaStreams) s.close();
