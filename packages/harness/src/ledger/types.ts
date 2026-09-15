@@ -92,6 +92,7 @@ export interface RunRecord {
 export type OutcomeKind =
   | 'pr-opened' | 'merged' | 'closed-unmerged' | 'empty-diff'
   | 'review-approve' | 'review-changes'
+  | 'fix-pushed' | 'resolved' | 'triaged'
   | 'failed' | 'abandoned' | 'budget-stopped' | 'idle-killed'
   | 'capacity-blocked' | 'infra-failure';
 
