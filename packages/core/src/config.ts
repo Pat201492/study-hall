@@ -8,6 +8,7 @@ import { DEFAULT_BLACKOUT, type BlackoutConfig } from './blackout.js';
 import { DEFAULT_GENERATED_FILES, type GeneratedFileRule } from './generated.js';
 import { DEFAULT_AC_TIERING, type AcTieringConfig } from './difficultyRubric.js';
 import type { Role } from './types.js';
+import type { IssueAuditGate } from './issueAudit.js';
 import type { Tier } from './tiers.js';
 import { normalizeRepo } from './repo.js';
 
@@ -65,6 +66,32 @@ export interface EngineConfig {
   pollMs: number;
   /** Structured crash-burst standdown: N same-signature failures within M minutes. */
   crashBurst: { count: number; windowMs: number; standdownMs: number };
+  /** The dashboard's provider section (same config.json): global choice, per-surface
+   *  overrides, failover order. The engine reads the `board` surface. */
+  provider: ProviderSettings;
+  /** Deterministic issue audit: observation mode by default (see classify.ts). */
+  issueAudit?: { enforce?: boolean; gate?: IssueAuditGate };
+  /** Set false to skip scope triage and implement every issue directly. */
+  triage?: boolean;
+  /** Committer identity for student commits; defaults to the global git config. */
+  gitIdentity?: { name: string; email: string };
+}
+
+export interface ProviderSettings {
+  default: string;
+  failoverOrder: string[];
+  perSurface: Partial<Record<string, string>>;
+  handoverAt?: number;
+  concurrency?: Record<string, number>;
+}
+
+export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
+  default: 'anthropic', failoverOrder: ['anthropic', 'openai'], perSurface: {}, handoverAt: 0.9,
+};
+
+/** The provider choice for the board surface: its override, else the global default. */
+export function boardProviderChoice(cfg: Pick<EngineConfig, 'provider'>): string {
+  return cfg.provider.perSurface.board ?? cfg.provider.default;
 }
 
 /** Tools a board student is given — measured at -11,382 tokens/turn vs the full surface. */
@@ -121,6 +148,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   boundedRun: { n: 5, unit: 'pr' },
   pollMs: 20_000,
   crashBurst: { count: 5, windowMs: 10 * 60_000, standdownMs: 30 * 60_000 },
+  provider: DEFAULT_PROVIDER_SETTINGS,
 };
 
 export function engineConfigPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -137,7 +165,7 @@ function rawConfig(path: string): Record<string, unknown> {
 
 /** Load with per-key merges so naming one knob keeps the measured defaults for the rest. */
 export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.ProcessEnv = process.env): EngineConfig {
-  const raw = rawConfig(path) as Partial<EngineConfig> & { repos?: Array<string | RepoConfig>; provider?: { concurrency?: Record<string, number> } };
+  const raw = rawConfig(path) as Partial<EngineConfig> & { repos?: Array<string | RepoConfig>; provider?: Partial<ProviderSettings> };
   const pools: Record<string, ProviderPoolConfig> = {};
   for (const [id, base] of Object.entries(DEFAULT_POOLS)) {
     const over = raw.pools?.[id];
@@ -158,6 +186,10 @@ export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.
     acTiering: { ...DEFAULT_AC_TIERING, ...(raw.acTiering ?? {}) },
     boundedRun: { ...DEFAULT_ENGINE_CONFIG.boundedRun, ...(raw.boundedRun ?? {}) },
     crashBurst: { ...DEFAULT_ENGINE_CONFIG.crashBurst, ...(raw.crashBurst ?? {}) },
+    provider: {
+      ...DEFAULT_PROVIDER_SETTINGS, ...(raw.provider ?? {}),
+      perSurface: { ...(raw.provider?.perSurface ?? {}) },
+    },
   };
   if (env.STUDY_HALL_STATE_DIR) cfg.stateDir = env.STUDY_HALL_STATE_DIR;
   if (env.POLL_MS) cfg.pollMs = Number(env.POLL_MS) || cfg.pollMs;

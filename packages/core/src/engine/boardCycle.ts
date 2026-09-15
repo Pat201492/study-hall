@@ -59,6 +59,9 @@ export interface CycleState {
   throttleLimit: number;
   /** Bounded run: units still allowed; null = unbounded. */
   boundedRemaining: number | null;
+  /** What a bounded unit is. With `pr`, new IMPLEMENT dispatches (plus those in
+   *  flight) are capped at the remaining count so the run cannot overshoot. */
+  boundedUnit?: 'pr' | 'merge';
   /** Item keys whose FIX should be a REWRITE (watchdog.needsRewrite). */
   rewriteItems?: ReadonlySet<string>;
   /** Attempts per item key, so a dispatch can be marked as a re-dispatch. */
@@ -265,6 +268,9 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
   let contention = 0;
   let probed: string | null = null;
   let providerHoldReported = false;
+  let newUnits = [...state.inFlight].filter((k) => k.startsWith('IMPLEMENT:')).length;
+  const unitCapped = (a: BoardAction): boolean =>
+    state.boundedRemaining != null && (state.boundedUnit ?? 'pr') === 'pr' && a.kind === 'IMPLEMENT' && newUnits >= state.boundedRemaining;
 
   for (const action of ordered) {
     const view = views.get(action.repo)!;
@@ -281,6 +287,10 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
 
     if (used >= budget) {
       decisions.push({ kind: 'hold', scope: 'action', reason: 'no-slots', action });
+      continue;
+    }
+    if (unitCapped(action)) {
+      decisions.push({ kind: 'hold', scope: 'action', reason: 'bounded-run-spent', action, detail: ` unit(s) left,  already started` });
       continue;
     }
 
@@ -348,6 +358,7 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
       reason: `${action.reason} [${describeSelect(sel.reason)}]`,
     });
     used += 1;
+    if (action.kind === 'IMPLEMENT') newUnits += 1;
     inFlightPerProvider[provider] = (inFlightPerProvider[provider] ?? 0) + 1;
     claimed.push(...files);
     if (action.kind === 'RESOLVE') contention += 1;

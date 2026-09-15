@@ -282,3 +282,19 @@ test('a halted provider is skipped in failover and excluded from the slot budget
   assert.equal(d[0].provider, 'openai');
   assert.equal(slotBudget(cfg, state({ halted: { anthropic: 'x' }, throttleLimit: 10 })), 2);
 });
+
+test('a bounded run in PR units caps new IMPLEMENT dispatches at the units remaining, counting in-flight implements', () => {
+  const boards = [board('o/r', { issues: [1, 2, 3].map((n) => issue({ number: n })), pulls: [pull({ number: 10, headRefName: 'feat/issue-9' })] })];
+  const out = decide(boards, state({ boundedRemaining: 2, boundedUnit: 'pr', throttleLimit: 10 }), { ...cfg, maxConcurrent: 10 });
+  const d = dispatches(out.decisions);
+  assert.deepEqual(d.map((x) => `${x.action.kind}:${x.action.number}`), ['REVIEW:10', 'IMPLEMENT:1', 'IMPLEMENT:2']);
+  assert.equal(holds(out.decisions).filter((h) => h.reason === 'bounded-run-spent').length, 1);
+
+  // One implement already in flight leaves room for exactly one more; reviews are never capped.
+  const inFlight = decide(boards, state({ boundedRemaining: 2, boundedUnit: 'pr', throttleLimit: 10, inFlight: new Set(['IMPLEMENT:o/r:issue-3']) }), { ...cfg, maxConcurrent: 10 });
+  assert.deepEqual(dispatches(inFlight.decisions).map((x) => `${x.action.kind}:${x.action.number}`), ['REVIEW:10', 'IMPLEMENT:1']);
+
+  // Merge units do not cap implements.
+  const merges = decide(boards, state({ boundedRemaining: 1, boundedUnit: 'merge', throttleLimit: 10 }), { ...cfg, maxConcurrent: 10 });
+  assert.equal(dispatches(merges.decisions).length, 4);
+});
