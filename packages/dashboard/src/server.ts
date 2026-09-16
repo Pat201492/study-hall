@@ -2,6 +2,9 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { repoSlug } from '@study-hall/core/github';
 import {
   BUILTIN_HARNESSES, BUILTIN_PROVIDERS, anthropicQuota, claudeCodeHarness, openaiQuota, registerBuiltins,
   openLedger, type Ledger, type QuotaSnapshot, type Provider, type OutcomeKind, resolveBin,
@@ -15,6 +18,8 @@ import { mountArena } from './arenaRoutes.js';
 import {
   configPath, isProviderChoice, isSurface, loadConfig, mutateConfig, providerFor, SURFACES, type StudyHallConfig,
 } from './config.js';
+
+const execFileAsync = promisify(execFile);
 
 // The study-hall dashboard server. Owns: the ledger (writer), the provider quota
 // monitors (Claude fed by student streams and probes; Codex by one app-server
@@ -178,6 +183,51 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
     const c = cfg();
     ledger.recordEvent({ ts: new Date().toISOString(), level: 'info', event: 'settings.provider', reason: `${surface ?? 'global'} -> ${String(choice)}` });
     return { ok: true, provider: { ...c.provider, effective: Object.fromEntries(SURFACES.map((s) => [s, providerFor(c, s)])) } };
+  });
+
+  // The boards the engine works, and the list every repo picker offers. Until
+  // this existed the only way to add one was hand-editing config.json, which is
+  // why a fresh install had an empty picker and no hint that it was the problem.
+  router.post('/api/settings/repos', async (ctx) => {
+    const { add, remove, verify } = ctx.body as { add?: unknown; remove?: unknown; verify?: unknown };
+    const one = (v: unknown, what: string): string => {
+      if (typeof v !== 'string' || !v.trim()) throw new Error(`${what} must be a repo name`);
+      const slug = repoSlug(v.trim());
+      // `owner/name`, the form every other part of the engine keys on.
+      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(slug)) throw new Error(`"${v}" is not owner/name`);
+      return slug;
+    };
+    const current = cfg().repos;
+    let next = [...current];
+    let added: string | null = null;
+    let removed: string | null = null;
+
+    if (add !== undefined) {
+      const slug = one(add, 'add');
+      if (current.some((r) => r.toLowerCase() === slug.toLowerCase())) return { ok: true, repos: current, note: `${slug} is already on the board list` };
+      // A typo here is expensive later: the engine would poll a 404 forever.
+      // Skippable, because a network hiccup should not stop an operator.
+      if (verify !== false) {
+        try { await execFileAsync('gh', ['repo', 'view', slug, '--json', 'name'], { windowsHide: true }); }
+        catch (e) { throw new Error(`gh cannot see ${slug} — check the name, or your gh login, or pass verify:false. (${(e as Error).message.split('\n')[0]})`); }
+      }
+      next = [...current, slug];
+      added = slug;
+    }
+    if (remove !== undefined) {
+      const slug = one(remove, 'remove');
+      next = next.filter((r) => r.toLowerCase() !== slug.toLowerCase());
+      if (next.length === current.length) return { ok: true, repos: current, note: `${slug} was not on the board list` };
+      removed = slug;
+    }
+    if (added === null && removed === null) throw new Error('pass add or remove');
+
+    mutateConfig(cfgFile, (raw) => { raw.repos = next; });
+    ledger.recordEvent({
+      ts: new Date().toISOString(), level: 'info', event: 'settings.repos',
+      repo: added ?? removed ?? undefined, reason: added ? `added ${added}` : `removed ${removed}`,
+    });
+    return { ok: true, repos: cfg().repos, note: added ? `${added} added — the engine picks it up on its next tick` : `${removed} removed` };
   });
 
   router.post('/api/ledger/import-v1', () => {

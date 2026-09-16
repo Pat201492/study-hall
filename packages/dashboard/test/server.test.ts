@@ -78,3 +78,34 @@ test('the web UI shell is served', async () => {
   assert.match(html, /provider-toggle/);
   assert.equal((await fetch(s.url + '/js/app.js')).headers.get('content-type'), 'text/javascript; charset=utf-8');
 });
+
+test('boards are added and removed from the UI, validated, deduped, and never verified twice against gh', async () => {
+  const before = await get('/api/settings') as { repos: string[] };
+  assert.deepEqual(before.repos, ['Pat201492/dungeonworks']);
+
+  // A second add of the same board is a no-op, not a duplicate row, and the
+  // match is case-insensitive because GitHub's own names are.
+  // verify:false skips the gh existence check, the only part needing a network.
+  let r = await post('/api/settings/repos', { add: 'pat201492/DUNGEONWORKS', verify: false }) as { ok: boolean; repos: string[]; note?: string };
+  assert.deepEqual(r.repos, ['Pat201492/dungeonworks']);
+  assert.match(r.note ?? '', /already on the board list/);
+
+  // A URL is accepted and normalised to owner/name, the form the engine keys on.
+  r = await post('/api/settings/repos', { add: 'https://github.com/Pat201492/equipworks', verify: false }) as typeof r;
+  assert.deepEqual(r.repos, ['Pat201492/dungeonworks', 'Pat201492/equipworks']);
+  assert.match(r.note ?? '', /added/);
+  assert.deepEqual((await get('/api/settings') as { repos: string[] }).repos, r.repos, 'it is written to config, not just held in memory');
+
+  r = await post('/api/settings/repos', { remove: 'Pat201492/dungeonworks' }) as typeof r;
+  assert.deepEqual(r.repos, ['Pat201492/equipworks']);
+  r = await post('/api/settings/repos', { remove: 'Pat201492/dungeonworks' }) as typeof r;
+  assert.match(r.note ?? '', /was not on the board list/);
+
+  for (const body of [{ add: 'nameonly' }, { add: '' }, {}]) {
+    const bad = await fetch(s.url + '/api/settings/repos', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });
+    assert.equal(bad.status, 500, `rejected: ${JSON.stringify(body)}`);
+  }
+  // Put the fixture back the way the other tests expect it.
+  await post('/api/settings/repos', { remove: 'Pat201492/equipworks' });
+  await post('/api/settings/repos', { add: 'Pat201492/dungeonworks', verify: false });
+});
