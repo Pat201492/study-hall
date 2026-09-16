@@ -39,6 +39,13 @@ export const DEFAULT_HEADROOM = 0.9;
 /** One finished run's spend, at the time it finished. */
 export interface RateSample {
   at: number;
+  /**
+   * When the run began. Optional: the burn governor only asks what has been
+   * spent recently, and for that the completion time is the honest instant.
+   * Window capacity needs the span, because it asks what was spent DURING an
+   * interval bracketed by readings the run itself produced while running.
+   */
+  startedAt?: number;
   tokens: number;
   usd: number;
 }

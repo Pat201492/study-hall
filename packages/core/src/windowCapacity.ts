@@ -94,8 +94,28 @@ const median = (xs: readonly number[]): number => {
   return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
 };
 
+/**
+ * Tokens spent inside [from, to], prorated across each run's own span.
+ *
+ * A run banks its whole cost at the moment it ends, but it spent that cost over
+ * minutes, and the quota readings that bracket an interval arrive on its stream
+ * WHILE it runs. Counting by end time alone puts a run's spend after every
+ * reading it caused, so no interval ever had tokens to explain it and the
+ * estimator found nothing to measure. A run is instead treated as burning at an
+ * even rate over its span, and the overlap with the interval is what counts.
+ *
+ * Even burn is a simplification — a run's spend is back-loaded, since each turn
+ * re-sends a longer context — so a single partly-overlapping run gives a rough
+ * figure. Whole runs inside the interval, which is the normal case, are exact.
+ */
 const tokensBetween = (spend: readonly RateSample[], from: number, to: number): number =>
-  spend.reduce((n, s) => (s.at > from && s.at <= to ? n + s.tokens : n), 0);
+  spend.reduce((n, s) => {
+    const started = s.startedAt ?? s.at;
+    const span = Math.max(0, s.at - started);
+    if (!span) return s.at > from && s.at <= to ? n + s.tokens : n; // instantaneous: the old rule
+    const overlap = Math.min(s.at, to) - Math.max(started, from);
+    return overlap <= 0 ? n : n + s.tokens * (overlap / span);
+  }, 0);
 
 /**
  * Every usable (delta, tokens) pair, oldest first.

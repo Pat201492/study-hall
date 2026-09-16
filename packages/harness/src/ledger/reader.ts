@@ -358,17 +358,33 @@ export class LedgerReader {
    * moment the spend landed; a run that started before the window but finished
    * inside it counts here, which is the conservative direction.
    */
-  spendSamples(since: TimeLike, provider?: string): Array<{ provider: string; at: number; tokens: number; usd: number; runId: string }> {
+  /**
+   * One sample per finished run: when it ended, what it cost, and when it began.
+   *
+   * `startedAt` matters to anything that asks what was spent DURING an interval.
+   * A run banks its tokens when it finishes, but the quota readings it produces
+   * arrive on its own stream while it is still running — so every reading from a
+   * run precedes that run's only token sample. Bucketing by end time alone puts
+   * the spend permanently outside the interval it caused, which is why window
+   * capacity could never find a pair to measure.
+   */
+  spendSamples(since: TimeLike, provider?: string): Array<{ provider: string; at: number; startedAt: number; tokens: number; usd: number; runId: string }> {
     const p: Record<string, Bindable> = { since: toIso(since) };
-    let sql = `SELECT runId, provider, endedAt,
+    let sql = `SELECT runId, provider, endedAt, startedAt,
         (inputTokens + outputTokens + cacheReadInputTokens + cacheCreationInputTokens + reasoningTokens) AS tokens,
         CASE WHEN fidelity = 'exact' THEN estimatedCostUsd ELSE 0 END AS usd
       FROM runs WHERE endedAt >= :since`;
     if (provider) { sql += ' AND provider = :provider'; p.provider = provider; }
     sql += ' ORDER BY endedAt ASC';
-    return (this.stmt(sql).all(p) as Row[]).map((r) => ({
-      provider: String(r.provider), at: Date.parse(String(r.endedAt)), tokens: Number(r.tokens ?? 0), usd: Number(r.usd ?? 0), runId: String(r.runId),
-    })).filter((r) => Number.isFinite(r.at));
+    return (this.stmt(sql).all(p) as Row[]).map((r) => {
+      const at = Date.parse(String(r.endedAt));
+      const started = Date.parse(String(r.startedAt));
+      return {
+        provider: String(r.provider), at,
+        startedAt: Number.isFinite(started) ? started : at,
+        tokens: Number(r.tokens ?? 0), usd: Number(r.usd ?? 0), runId: String(r.runId),
+      };
+    }).filter((r) => Number.isFinite(r.at));
   }
 
   /** Engine events, newest first. */

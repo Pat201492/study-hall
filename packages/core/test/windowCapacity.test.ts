@@ -84,3 +84,34 @@ test('one sample is reported as an order of magnitude, not a number', () => {
   assert.equal(e.low, e.high);
   assert.match(e.note ?? '', /order of magnitude/);
 });
+
+test('a run is credited to the interval it burned in, not to the instant it ended', () => {
+  // The case that made an estimate impossible in practice: the readings that
+  // bracket an interval arrive on a run's own stream WHILE it runs, so the run
+  // always ended after both of them. Bucketing by end time found no tokens to
+  // explain any move, and every window reported "size unknown" forever.
+  const observations = [obs(10 * MIN, 0.10), obs(20 * MIN, 0.20)];
+  const run = { at: 30 * MIN, startedAt: 0, tokens: 3_000_000, usd: 0 };
+  const samples = capacitySamples(observations, [run]);
+  assert.equal(samples.length, 1, 'the run overlaps the interval even though it ended after it');
+  // 10 of the run's 30 minutes fall inside the interval: a third of its spend.
+  assert.equal(Math.round(samples[0].tokens), 1_000_000);
+  assert.equal(Math.round(samples[0].implied), 10_000_000);
+});
+
+test('a run wholly inside the interval is counted exactly, and one wholly outside not at all', () => {
+  const observations = [obs(0, 0.10), obs(20 * MIN, 0.20)];
+  const inside = { at: 15 * MIN, startedAt: 5 * MIN, tokens: 1_000_000, usd: 0 };
+  const before = { at: -1 * MIN, startedAt: -10 * MIN, tokens: 9_000_000, usd: 0 };
+  const s = capacitySamples(observations, [before, inside]);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].tokens, 1_000_000, 'the earlier run contributes nothing');
+});
+
+test('a sample with no start time keeps the old instant rule, so older ledger rows still work', () => {
+  const observations = [obs(0, 0.10), obs(20 * MIN, 0.20)];
+  const legacy: RateSample = { at: 10 * MIN, tokens: 1_000_000, usd: 0 };
+  assert.equal(capacitySamples(observations, [legacy])[0].tokens, 1_000_000);
+  const after: RateSample = { at: 30 * MIN, tokens: 1_000_000, usd: 0 };
+  assert.equal(capacitySamples(observations, [after]).length, 0, 'and still falls outside when it ended later');
+});
