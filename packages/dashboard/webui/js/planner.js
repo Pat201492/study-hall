@@ -142,10 +142,20 @@ export async function renderPlanner(el, { api, fmt, status }) {
       ].join('');
       const links = f.issues.length ? `<div class="muted" style="font-size:12px">${f.issues.map((n) => `#${n}`).join(', ')}</div>` : '';
       return `<div style="border-top:1px solid var(--line); padding:6px 0">
-        <div><span class="${cls}">${label}</span> · <b>${fmt.esc(f.subject)}</b></div>
+        <div><label><input type="checkbox" class="p-mirror-pick" value="${fmt.esc(f.subject)}" checked> <span class="${cls}">${label}</span> · <b>${fmt.esc(f.subject)}</b></label></div>
         ${quotes}<div class="muted" style="font-size:12px">${fmt.esc(f.detail)}</div>${links}</div>`;
     }).join('');
-    out.innerHTML = head + rows + mirrorText(report);
+    out.innerHTML = head + rows
+      + `<div style="margin-top:8px"><button class="btn" id="p-mirror-stage">Stage checked as drafts</button> <span class="muted" id="p-mirror-stage-msg"></span></div>`
+      + mirrorText(report);
+    out.querySelector('#p-mirror-stage').addEventListener('click', async () => {
+      const subjects = [...out.querySelectorAll('.p-mirror-pick')].filter((c) => c.checked).map((c) => c.value);
+      const msg = out.querySelector('#p-mirror-stage-msg');
+      if (!subjects.length) { msg.textContent = 'nothing checked'; return; }
+      const r = await api.post('/api/planner/mirror/stage', { repo, subjects });
+      // Staged only. Filing stays behind the existing confirm button.
+      msg.textContent = r.ok ? `${r.staged} draft(s) staged — review them above, then File` : (r.msg || 'failed');
+    });
   }
 
   function mirrorText(report) {

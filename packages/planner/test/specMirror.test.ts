@@ -112,3 +112,39 @@ test('sortFindings is stable on subject so a re-run does not reshuffle the list'
   const f = (kind: 'contradiction' | 'unbuilt-promise', subject: string) => ({ kind, subject, readmeSays: null, issuesSay: null, issues: [], detail: '' });
   assert.deepEqual(sortFindings([f('unbuilt-promise', 'b'), f('contradiction', 'z'), f('unbuilt-promise', 'a')]).map((x) => x.subject), ['z', 'a', 'b']);
 });
+
+test('an unannounced surface becomes a buildable documentation issue; a decision becomes a parked one', async () => {
+  const { draftFromFinding } = await import('../src/specMirror.js');
+  const surface = draftFromFinding({
+    kind: 'unannounced-surface', subject: 'the burn rate governor', readmeSays: null,
+    issuesSay: 'rests a provider at a cap', issues: [2], detail: 'the README never mentions it',
+  });
+  assert.equal(surface.needsHuman, undefined, 'a README edit is work a student can finish');
+  assert.deepEqual(surface.owns, ['README.md']);
+  assert.match(surface.title, /^docs: /);
+  assert.match(surface.body, /## Goal[\s\S]*## Scope[\s\S]*## Acceptance/);
+  assert.match(surface.body, /- \[ \] The README describes the burn rate governor/);
+  assert.match(surface.body, /- \[ \] No file outside the README changes/);
+  assert.match(surface.body, /Related issues: #2/);
+
+  for (const kind of ['contradiction', 'unbuilt-promise'] as const) {
+    const d = draftFromFinding({ kind, subject: 'issue filing', readmeSays: 'the model files issues', issuesSay: 'the orchestrator files', issues: [1], detail: '' });
+    // A student handed a decision picks a side at random and the PR looks fine.
+    assert.equal(d.needsHuman, true, `${kind} is a decision, not a task`);
+    assert.match(d.title, /^decide: /);
+    assert.match(d.body, /The README says: "the model files issues"/);
+    assert.match(d.body, /The issues say: "the orchestrator files"/);
+    assert.match(d.body, /- \[ \] A human decides which side is right/);
+  }
+});
+
+test('draft keys are stable and distinct per kind, so re-running does not file the same gap twice', async () => {
+  const { draftFromFinding } = await import('../src/specMirror.js');
+  const f = { subject: 'Spec Mirror!! v2', readmeSays: null, issuesSay: null, issues: [], detail: '' };
+  const a = draftFromFinding({ ...f, kind: 'unannounced-surface' });
+  const b = draftFromFinding({ ...f, kind: 'unannounced-surface' });
+  const c = draftFromFinding({ ...f, kind: 'contradiction' });
+  assert.equal(a.key, b.key);
+  assert.notEqual(a.key, c.key);
+  assert.match(a.key, /^docs-readme-spec-mirror-v2$/, 'punctuation is slugged away rather than carried into the key');
+});

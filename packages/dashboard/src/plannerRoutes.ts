@@ -9,7 +9,7 @@ import {
 import { fetchAllIssues, fetchIssues, listLabels, repoSlug } from '@study-hall/core/github';
 import {
   PLAN_ROLE, PlannerSession, PlannerStore, createMcpHandler, createPlannerMcp, fileBatch, lintBatch, loadRubric,
-  mcpClientConfigs, runSpecMirror, isFresh, type RepoContext, type IssueDigest, type MirrorPort, type MirrorReport,
+  mcpClientConfigs, runSpecMirror, isFresh, draftFromFinding, type RepoContext, type IssueDigest, type MirrorPort, type MirrorReport,
 } from '@study-hall/planner';
 import { sideRun } from '@study-hall/harness/ledger/sideRun';
 import type { Router, SseStream } from './router.js';
@@ -310,6 +310,26 @@ export function mountPlanner(router: Router, deps: PlannerDeps): { stop: () => P
       reason: `${report.findings.length} finding(s) over ${report.issueCount} issue(s) on ${provider}`,
     });
     return { ok: true, report, cached: false };
+  });
+
+  // Stage selected findings as ordinary drafts, so the gap goes out through the
+  // same lint -> review -> file path every other issue takes. Nothing here files
+  // anything: the "File accepted drafts" button still gates it.
+  router.post('/api/planner/mirror/stage', async (ctx) => {
+    const { repo, subjects } = ctx.body as { repo?: string; subjects?: unknown };
+    if (!repo) throw new Error('repo is required');
+    const slug = repoSlug(repo);
+    const report = mirrorCache.get(slug);
+    if (!report) throw new Error('run the spec mirror first');
+    const wanted = Array.isArray(subjects) ? new Set(subjects.map(String)) : null;
+    const picked = report.findings.filter((f) => !wanted || wanted.has(f.subject));
+    if (!picked.length) throw new Error('no finding matched');
+    const drafts = picked.map(draftFromFinding);
+    const c = await repoContext(slug);
+    const lints = lintBatch(drafts, { openIssues: c.openIssues, repoLabels: c.labels });
+    const batch = store(slug).stage(drafts, lints);
+    notifyDrafts(slug);
+    return { ok: true, staged: batch.drafts.length, lints };
   });
 
   return {

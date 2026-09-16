@@ -1,3 +1,4 @@
+import type { IssueDraft } from './drafts.js';
 import { createHash } from 'node:crypto';
 
 // Spec mirror: write the README the ISSUES imply, then compare it with the one
@@ -242,4 +243,83 @@ export async function runSpecMirror(input: MirrorInput): Promise<MirrorReport> {
 export function isFresh(report: MirrorReport | null, issues: readonly IssueDigest[], readme: string): boolean {
   if (!report) return false;
   return report.issuesSha256 === issuesSha256(issues) && report.readmeSha256 === sha256(readme);
+}
+
+/**
+ * A finding as a rubric-shaped draft, for the ordinary propose → lint → file path.
+ *
+ * Only one of the three kinds is work a worktree-bound student can finish. An
+ * unannounced surface is a documentation change with a checkable result: the
+ * README gains a section, and a reviewer can see it in the diff.
+ *
+ * The other two are decisions, not tasks. Choosing between building a promise
+ * and withdrawing it is a product call, and a contradiction is exactly the case
+ * where nobody yet knows which side is right — handing either to a student
+ * means it picks one at random and the PR looks fine. Both are filed
+ * `needsHuman`, which is the engine's park path, rather than dressed up as
+ * buildable work.
+ */
+export function draftFromFinding(finding: MirrorFinding): IssueDraft {
+  const slug = finding.subject.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'spec-drift';
+  const refs = finding.issues.length ? `\n\nRelated issues: ${finding.issues.map((n) => `#${n}`).join(', ')}.` : '';
+  const quotes = [
+    finding.readmeSays ? `- The README says: "${finding.readmeSays}"` : null,
+    finding.issuesSay ? `- The issues say: "${finding.issuesSay}"` : null,
+  ].filter(Boolean).join('\n');
+  const found = `\n\n<!-- found by the spec mirror: the README implied by this repo's issues disagreed with the one in the repo -->`;
+
+  if (finding.kind === 'unannounced-surface') {
+    return {
+      key: `docs-readme-${slug}`,
+      title: `docs: the README does not mention ${finding.subject}`,
+      body: [
+        '## Goal',
+        `The repository builds ${finding.subject}, and its README never says so. Document it.`,
+        '',
+        '## Scope',
+        '- `README.md` only. No behaviour changes.',
+        '',
+        '## What the two sources say',
+        quotes || `- The issues describe ${finding.subject}; the README does not mention it.`,
+        finding.detail ? `\n${finding.detail}` : '',
+        '',
+        '## Acceptance',
+        `- [ ] The README describes ${finding.subject}, in the place a reader would look for it.`,
+        '- [ ] The description matches what the linked issues actually built, with no capability the code does not have.',
+        '- [ ] No file outside the README changes.',
+        refs, found,
+      ].join('\n'),
+      labels: ['documentation'],
+      owns: ['README.md'],
+    };
+  }
+
+  const isContradiction = finding.kind === 'contradiction';
+  return {
+    key: `spec-${isContradiction ? 'contradiction' : 'promise'}-${slug}`,
+    title: isContradiction
+      ? `decide: the README and the issues disagree about ${finding.subject}`
+      : `decide: the README promises ${finding.subject}, and no issue builds it`,
+    body: [
+      '## Goal',
+      isContradiction
+        ? `The README and this repo's issues describe ${finding.subject} differently. Until someone says which is right, every student working near it is aimed at the wrong target.`
+        : `The README promises ${finding.subject}. Nothing in the issues builds it. Either it should be built, or the README should stop claiming it.`,
+      '',
+      '## What the two sources say',
+      quotes || '(nothing quotable was returned)',
+      finding.detail ? `\n${finding.detail}` : '',
+      '',
+      '## Why this is parked rather than assigned',
+      'This is a decision, not a task. A student handed it would pick a side at random and the pull request would look correct either way.',
+      '',
+      '## Acceptance',
+      '- [ ] A human decides which side is right and records the decision here.',
+      isContradiction
+        ? '- [ ] The losing side is corrected: either the README is rewritten or a follow-up issue is filed to change the behaviour.'
+        : '- [ ] Either a follow-up issue exists to build it, or the README no longer claims it.',
+      refs, found,
+    ].join('\n'),
+    needsHuman: true,
+  };
 }
