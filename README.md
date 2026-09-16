@@ -11,6 +11,9 @@ Research dossiers behind every design call: `docs/research/`.
 
 Runs on Node ≥ 22.5 (`node:sqlite`), zero native dependencies, Windows-first, no CI (tests run locally).
 
+**Before changing anything that spends tokens, read `docs/BEST-PRACTICES.md`** — the rules this
+project keeps re-learning, each with the defect that paid for it.
+
 ## Planner in your own terminal
 
 `node --import tsx scripts/install-planner-skill.ts <owner/name>` writes `/plan-feature` for Claude Code
