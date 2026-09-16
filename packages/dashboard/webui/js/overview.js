@@ -56,13 +56,36 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
         <div style="margin-top:8px"><button class="btn" id="import-v1">Import v1 usage.jsonl</button> <span class="muted" id="import-msg"></span></div></div>
     </div>`;
 
-  el.querySelectorAll('button[data-probe]').forEach((b) => b.addEventListener('click', async () => {
-    const id = b.dataset.probe; const msg = el.querySelector(`#probe-${id}`);
-    b.disabled = true; msg.textContent = id === 'anthropic' ? 'running one haiku turn…' : 'reading app-server…';
-    try { const r = await api.post(`/api/quota/probe/${id}`); msg.textContent = r.ok ? `${r.quota.state}${r.costUsd != null ? ` · est. ${fmt.usd(r.costUsd)}` : ''}` : (r.msg || 'failed'); }
-    catch (e) { msg.textContent = String(e); }
-    b.disabled = false; await refreshStatus();
-  }));
+  // A probe spends a real turn to fetch a fresh reading, so the card it was run
+  // from has to show that reading. It used to call refreshStatus(), which only
+  // repaints the header, leaving the bars saying "No window observed yet" after
+  // a probe that had in fact just observed one.
+  function paintProviders(providers) {
+    el.querySelector('#providers').innerHTML = providers.map((p) => providerCard(p, fmt)).join('');
+    bindProbes();
+  }
+
+  function bindProbes() {
+    el.querySelectorAll('button[data-probe]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.probe; const msg = el.querySelector(`#probe-${id}`);
+      b.disabled = true; msg.textContent = id === 'anthropic' ? 'running one haiku turn…' : 'reading app-server…';
+      try {
+        const r = await api.post(`/api/quota/probe/${id}`);
+        if (!r.ok) { msg.textContent = r.msg || 'failed'; b.disabled = false; return; }
+        const fresh = await api.get('/api/status');
+        await refreshStatus();
+        // Repaint first, then report: the bars are the answer, the line is the receipt.
+        paintProviders(fresh.providers);
+        const after = el.querySelector(`#probe-${id}`);
+        const w = r.quota?.observation?.fiveHour ?? r.quota?.observation?.sevenDay ?? null;
+        if (after) after.textContent = `${r.quota.state}${w ? ` · ${Math.round(w.utilization * 100)}% used` : ''}${r.costUsd != null ? ` · est. ${fmt.usd(r.costUsd)}` : ''}`;
+      } catch (e) {
+        msg.textContent = String(e);
+        b.disabled = false;
+      }
+    }));
+  }
+  bindProbes();
   el.querySelector('#import-v1').addEventListener('click', async () => {
     const m = el.querySelector('#import-msg'); m.textContent = 'importing…';
     const r = await api.post('/api/ledger/import-v1');

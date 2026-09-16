@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { repoSlug } from '@study-hall/core/github';
+import { sideRun } from '@study-hall/harness/ledger/sideRun';
 import {
   BUILTIN_HARNESSES, BUILTIN_PROVIDERS, anthropicQuota, claudeCodeHarness, openaiQuota, registerBuiltins,
   openLedger, type Ledger, type QuotaSnapshot, type Provider, type OutcomeKind, resolveBin,
@@ -113,9 +114,18 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
       return { ok: true, provider: id, quota: openaiQuota.snapshot() };
     }
     if (id === 'anthropic') {
+      const startedAt = Date.now();
       const r = await claudeCodeHarness.run('Reply with exactly the word OK.', {
         cwd: cfg().stateDir, model: 'haiku', tools: ['Read'], idleTicks: 2, approval: 'on-request',
       });
+      // A probe is a real completion against the same window it is measuring.
+      // Banking it keeps the burn governor honest and gives the window-capacity
+      // estimator a token figure to pair with the reading it just took (#21).
+      ledger.recordRun(sideRun({
+        role: 'preflight', provider: 'anthropic', harness: claudeCodeHarness.id, usage: r.usage,
+        startedAt, endedAt: Date.now(), meter: r.meter, model: 'haiku', sessionId: r.sessionId,
+        turns: r.turns, reportedCostUsd: r.costUsd ?? null, notes: 'quota probe',
+      }));
       ledger.recordEvent({ ts: new Date().toISOString(), level: 'info', event: 'quota.probe', reason: `anthropic probe: ${r.text.slice(0, 40)}` });
       return { ok: true, provider: id, quota: anthropicQuota.snapshot(), costUsd: r.costUsd ?? null };
     }
