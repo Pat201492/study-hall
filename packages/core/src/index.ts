@@ -40,6 +40,7 @@ const engine = new Engine({
     harnesses: {
       get: getHarness,
       quotaFor: (id) => { try { return getProvider(id).quota; } catch { return undefined; } },
+      meterFor: (id) => { try { return getProvider(id).meter; } catch { return undefined; } },
       killAll: killAllHarnesses,
     },
   },

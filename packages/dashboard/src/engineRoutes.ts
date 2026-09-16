@@ -10,6 +10,7 @@ import { fetchIssues, listOpenPulls, removeLabel, parseDeps, repoSlug, type RawI
 import { loadEngineConfig } from '@study-hall/core/config';
 import { assessRate, hasCap, resolveLimit, suggestTokensPerHour, DEFAULT_WINDOW_MS, type RateLimit } from '@study-hall/core/rateBudget';
 import { assessPace, paceSamples, DEFAULT_PACE } from '@study-hall/core/windowPace';
+import { estimateWindowCapacity, sustainableTokensPerHour } from '@study-hall/core/windowCapacity';
 import { requestDrain, clearDrain, drainRequested } from '@study-hall/core/drain';
 import type { Router } from './router.js';
 import { configPath, mutateConfig, type StudyHallConfig } from './config.js';
@@ -147,6 +148,9 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
       // ledger holds either way — so the projected exhaustion is shown whether
       // or not the engine is up.
       const paceOpts = ecfg.provider.pace?.[id];
+      // A week of readings: enough to hold several five-hour windows and one
+      // seven-day window, which is the longest window either vendor reports.
+      const capacity = estimateWindowCapacity(deps.ledger.reader.quotaHistory(id, new Date(now2 - 7 * 24 * 60 * 60_000)), mine, now2);
       const pace = paceOpts?.enabled
         ? (v.live ? v.status?.providers?.[id]?.pace ?? null : null)
           ?? assessPace(id, paceSamples(deps.ledger.reader.quotaHistory(id, new Date(now2 - (paceOpts.lookbackMs ?? DEFAULT_PACE.lookbackMs)))), now2, paceOpts)
@@ -161,6 +165,10 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
         paceEnabled: !!paceOpts?.enabled,
         suggestedTokensPerHour: suggestTokensPerHour(mine, now2, resolveLimit(limit).windowMs),
         runsInWindow: mine.filter((s) => s.at > now2 - resolveLimit(limit).windowMs).length,
+        // What the vendor's percentage is worth in tokens. Derived from the
+        // ledger's own history, so it is available with the engine stopped.
+        capacity,
+        sustainableTokensPerHour: Object.fromEntries(Object.entries(capacity).map(([w, e]) => [w, sustainableTokensPerHour(e)])),
       };
     }
     return { providers, windowMinutes: Math.round(windowMs / 60_000), engineLive: v.live };

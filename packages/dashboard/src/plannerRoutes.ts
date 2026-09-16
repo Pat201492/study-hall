@@ -11,6 +11,7 @@ import {
   PLAN_ROLE, PlannerSession, PlannerStore, createMcpHandler, createPlannerMcp, fileBatch, lintBatch, loadRubric,
   mcpClientConfigs, type RepoContext,
 } from '@study-hall/planner';
+import { sideRun } from '@study-hall/harness/ledger/sideRun';
 import type { Router, SseStream } from './router.js';
 import { providerFor, type StudyHallConfig } from './config.js';
 
@@ -143,6 +144,17 @@ export function mountPlanner(router: Router, deps: PlannerDeps): { stop: () => P
       codexOverrides: mcpClientConfigs(mcpUrl(slug), token()).codexOverrides,
       model: deps.cfg().models[provider]?.default,
       resume: last?.sessionId ?? undefined,
+      // A planning conversation spends the same account window the students do.
+      // Banking it keeps the burn governor honest and gives the window-capacity
+      // estimator something to pair the vendor's percentage against (#21).
+      onSpend: ({ usage, costUsd, startedAt, endedAt }) => {
+        deps.ledger.recordRun(sideRun({
+          role: 'planner', provider, harness: harness.id, usage, startedAt, endedAt, repo: slug,
+          meter: harness.capabilities.reportsCost ? 'metered' : 'subscription',
+          model: deps.cfg().models[provider]?.default ?? null,
+          sessionId: session.record.sessionId ?? null, reportedCostUsd: costUsd,
+        }));
+      },
       onProposals: (drafts) => {
         void repoContext(slug).then((c) => {
           store(slug).stage(drafts, lintBatch(drafts, { openIssues: c.openIssues, repoLabels: c.labels }));

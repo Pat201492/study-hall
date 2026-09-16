@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { ChatEvent, ChatSession, Harness } from '@study-hall/harness';
+import type { ChatEvent, ChatSession, Harness, Usage } from '@study-hall/harness';
 import { PLAN_ROLE } from './planRole.js';
 import { parseProposals, type IssueDraft } from './drafts.js';
 
@@ -42,6 +42,16 @@ export interface PlannerSessionOptions {
   /** Fallback: drafts the model emitted as a fenced `planner-proposals` block
    *  because its tools were unavailable. The caller lints and stages them. */
   onProposals?: (drafts: IssueDraft[]) => void;
+  /**
+   * Fired once per completed turn with that turn's spend.
+   *
+   * A planning conversation burns the same account window the students do. It
+   * went unbanked, so the burn governor under-counted and nothing could relate
+   * the vendor's utilization to tokens (#21). Both chat adapters emit per-turn
+   * usage — the Codex one already nets off its cumulative baseline — so the
+   * figure here is the turn's own.
+   */
+  onSpend?: (spend: { usage: Usage; costUsd: number | null; startedAt: number; endedAt: number }) => void;
 }
 
 export class PlannerSession {
@@ -53,6 +63,7 @@ export class PlannerSession {
   private readonly subs = new Set<(e: StoredEvent) => void>();
   private readonly ringSize: number;
   private busy = false;
+  private turnStartedAt: number | null = null;
 
   constructor(private readonly opts: PlannerSessionOptions) {
     this.id = randomUUID();
@@ -105,6 +116,12 @@ export class PlannerSession {
     if (event.type === 'turn_done') {
       this.busy = false;
       this.record.turns++;
+      if (event.usage && this.opts.onSpend) {
+        const startedAt = this.turnStartedAt ?? Date.now();
+        try { this.opts.onSpend({ usage: event.usage, costUsd: event.costUsd ?? null, startedAt, endedAt: Date.now() }); }
+        catch { /* banking spend must never break the turn */ }
+      }
+      this.turnStartedAt = null;
       if (event.sessionId) this.record.sessionId = event.sessionId;
       this.persist();
     }
@@ -129,6 +146,7 @@ export class PlannerSession {
     if (!this.chat) throw new Error('session not started');
     if (this.busy) throw new Error('a turn is already in flight; interrupt it first');
     this.busy = true;
+    this.turnStartedAt = Date.now();
     this.push({ type: 'status', message: `user: ${text}` });
     await this.chat.send(text);
   }

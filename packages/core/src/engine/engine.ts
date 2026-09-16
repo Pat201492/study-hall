@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Harness, PreflightResult, QuotaMonitor, QuotaSnapshot, Usage } from '@study-hall/harness/contract';
+import type { Harness, MeterKind, PreflightResult, QuotaMonitor, QuotaSnapshot, Usage } from '@study-hall/harness/contract';
 import { WarmSlot } from '@study-hall/harness/warmSlot';
 import { tokensProcessed, cacheHitPct } from '@study-hall/harness/pricing';
 import type { Ledger, EventRecord, RunRecord } from '@study-hall/harness/ledger/index';
+import { sideRun } from '@study-hall/harness/ledger/sideRun';
 import { decide, type BoardSnapshot, type CycleConfig, type Decision } from './boardCycle.js';
 import { Governance, type GovernanceVerdict } from './governance.js';
 import { Persistence, type RepoMemory } from './persistence.js';
@@ -58,6 +59,8 @@ export interface EngineGit {
 export interface HarnessPort {
   get(id: string): Harness;
   quotaFor(provider: string): QuotaMonitor | undefined;
+  /** The provider's meter, for spend that is not a role-run (a preflight probe). */
+  meterFor?(provider: string): MeterKind | undefined;
   killAll(): void;
 }
 
@@ -361,7 +364,16 @@ export class Engine {
     if (!harnessId) return null;
     let harness: Harness;
     try { harness = this.opts.ports.harnesses.get(harnessId); } catch (e) { this.log.err(`${provider}: ${(e as Error).message}`); return null; }
+    const startedAt = this.now();
     const r = await harness.preflight().catch((e) => ({ ok: false, detail: (e as Error).message } as PreflightResult));
+    // A probe is a real completion. Bank it, or the window moves with nothing
+    // in the ledger to explain it and the burn governor under-counts (#21).
+    if (r.usage) {
+      this.ledger.recordRun(sideRun({
+        role: 'preflight', provider, harness: harness.id, usage: r.usage, startedAt, endedAt: this.now(),
+        meter: this.opts.ports.harnesses.meterFor?.(provider) ?? 'subscription', notes: r.version ? `probe on ${r.version}` : null,
+      }));
+    }
     const quota = this.opts.ports.harnesses.quotaFor(provider);
     if (r.ok && r.authOk !== false) {
       quota?.observe({ provider, observedAt: this.now(), source: 'probe', allowed: true, detail: r.version ? `preflight ok (${r.version})` : 'preflight ok' });

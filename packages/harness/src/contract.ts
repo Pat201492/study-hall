@@ -255,6 +255,14 @@ export interface PreflightResult {
    *  an expired login, which is exactly the failure this exists to catch. */
   authOk?: boolean;
   detail?: string;
+  /**
+   * What the probe completion cost, where the adapter can report it.
+   *
+   * A probe is a real completion against the account's window, so leaving it
+   * unbanked let the window move with no spend to explain it (#21). Absent on
+   * adapters that cannot report it; absent is not zero.
+   */
+  usage?: Usage;
 }
 
 /** Normalised interactive-session events: the planner UI never branches on provider. */

@@ -642,9 +642,12 @@ test('preflight: not found -> ok:false without spawning anything', async () => {
 });
 
 test('preflight: --version then a trivial haiku completion proves auth', async () => {
-  const s = preflightSpawn({ type: 'result', subtype: 'success', is_error: false, result: 'OK', session_id: 'p1', modelUsage: {} });
+  const s = preflightSpawn({ type: 'result', subtype: 'success', is_error: false, result: 'OK', session_id: 'p1', modelUsage: { 'claude-haiku-4-5': { inputTokens: 12, outputTokens: 3, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } });
   const r = await harness().preflight({ spawnFn: s.spawnFn, cwd: '/w' });
-  assert.deepEqual(r, { ok: true, bin: 'C:/fake/claude.exe', version: '2.1.270', authOk: true });
+  // The probe's own spend comes back: it is a real completion against the
+  // account's window, and the ledger banks it rather than letting the window
+  // move with nothing to explain it (#21).
+  assert.deepEqual(r, { ok: true, bin: 'C:/fake/claude.exe', version: '2.1.270', authOk: true, usage: { inputTokens: 12, outputTokens: 3, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 } });
   assert.deepEqual(s.calls[0].args, ['--version']);
   assert.deepEqual(s.calls[1].args, ['-p', 'Reply with exactly the word OK.', '--output-format', 'json', '--model', 'haiku', '--max-turns', '1']);
   assert.equal(s.calls[1].options.cwd, '/w');

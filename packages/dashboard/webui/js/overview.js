@@ -89,6 +89,32 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
 // back when the window rolls forward. Uncapped by default: the right number is
 // a fact about this account, so the suggestion comes from the ledger's own hours.
 
+
+/**
+ * What the vendor's percentage is worth in tokens.
+ *
+ * The vendors report a window as a percentage and a reset time, never as a
+ * quantity, which leaves "31 % used" and "13 M tokens last hour" sitting on the
+ * same screen with nothing relating them. This line is that relation, derived
+ * from the ledger's own history (study-hall #21).
+ */
+function capacityLine(b, fmt) {
+  const windows = Object.values(b.capacity ?? {});
+  if (!windows.length) return '';
+  const rows = windows.map((w) => {
+    const label = WINDOW_LABEL[w.window] ?? `${w.window} window`;
+    const used = w.utilization == null ? '' : ` · ${Math.round(w.utilization * 100)} % used`;
+    if (w.tokens == null) return `<div><b>${label}</b>${used} <span class="muted">— size unknown: ${w.note ?? 'not enough paired readings yet'}</span></div>`;
+    const even = b.sustainableTokensPerHour?.[w.window];
+    const spread = w.samples > 1 && w.low && w.high ? ` <span class="muted">(${w.samples} samples, ${fmt.tok(w.low)}–${fmt.tok(w.high)})</span>` : ` <span class="muted">(${w.samples} sample${w.samples === 1 ? '' : 's'})</span>`;
+    const left = w.remaining == null ? '' : ` · about ${fmt.tok(w.remaining)} left`;
+    const pace = even ? ` · an even pace is ${fmt.tok(even)}/hour` : '';
+    const warn = w.note ? `<div class="warn" style="font-size:12px">${w.note}</div>` : '';
+    return `<div><b>${label}</b> is about ${fmt.tok(w.tokens)} tokens${spread}${used}${left}${pace}</div>${warn}`;
+  });
+  return `<div class="muted" style="font-size:12px;margin-top:6px">${rows.join('')}</div>`;
+}
+
 function burnCard(id, b, windowMinutes, fmt) {
   const r = b.rate;
   const cap = r.tokens.cap;
@@ -117,7 +143,7 @@ function burnCard(id, b, windowMinutes, fmt) {
            : `<span class="muted">${fmt.esc(p?.note ?? 'measuring…')}</span>`}
          <button class="btn" data-pace="${id}" data-on="0">Off</button></span></div>`;
   const suggest = b.suggestedTokensPerHour
-    ? `<div class="muted" style="font-size:12px;margin-top:4px">Busiest recent hour on this lane: ${fmt.tok(b.suggestedTokensPerHour)} tokens. A cap below that parks the board; well above it never binds.</div>`
+    ? `<div class="muted" style="font-size:12px;margin-top:4px">A typical busy hour on this lane: ${fmt.tok(b.suggestedTokensPerHour)} tokens (the median of its non-empty hours over the last week). A cap below that parks the board; well above it never binds.</div>`
     : '<div class="muted" style="font-size:12px;margin-top:4px">No history on this lane yet — run something first, or set a cap you are comfortable with.</div>';
   return `<div class="card">
     <div class="kv"><h2><span class="pill ${id}">${id}</span></h2>${state}</div>
@@ -128,6 +154,7 @@ function burnCard(id, b, windowMinutes, fmt) {
       <button class="btn" data-savecap="${id}">Save</button></span></div>
     <div class="muted" style="font-size:12px">0 = uncapped. Takes effect on the engine's next tick.</div>
     ${paceLine}
+    ${capacityLine(b, fmt)}
     ${suggest}
     <span class="muted" id="cap-msg-${id}"></span>
   </div>`;

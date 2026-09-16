@@ -709,7 +709,7 @@ export function createClaudeCodeHarness(deps: ClaudeCodeDeps = {}): Harness {
         : `${verdict.kind}: ${message}`;
       return { ok: false, bin: bin.path, version, authOk: false, detail };
     }
-    return { ok: true, bin: bin.path, version, authOk: true };
+    return { ok: true, bin: bin.path, version, authOk: true, usage: r.usage };
   }
 
   const harness: Harness = {
