@@ -31,7 +31,12 @@ export async function renderPlanner(el, { api, fmt, status }) {
       </div>
       <div class="card"><h3>Drafts</h3><div id="p-drafts" class="muted">nothing staged</div>
         <div style="margin-top:10px"><button class="btn primary" id="p-file" hidden>File accepted drafts</button> <span class="muted" id="p-file-msg"></span></div>
-        <h3 style="margin-top:14px">Filed</h3><div id="p-filed" class="muted">—</div></div>
+        <h3 style="margin-top:14px">Filed</h3><div id="p-filed" class="muted">—</div>
+        <h3 style="margin-top:14px">Spec mirror</h3>
+        <div class="muted" style="font-size:12px">Writes the README these issues imply, without ever seeing the real one, then compares the two.</div>
+        <div style="margin-top:8px"><button class="btn" id="p-mirror">Check issues against the README</button> <span class="muted" id="p-mirror-msg"></span></div>
+        <div id="p-mirror-out" style="margin-top:8px"></div>
+      </div>
     </div>`;
 
   const chat = el.querySelector('#p-chat');
@@ -115,6 +120,51 @@ export async function renderPlanner(el, { api, fmt, status }) {
   el.querySelector('#p-resume').addEventListener('click', () => start(true));
   el.querySelector('#p-stop').addEventListener('click', async () => { await api.post('/api/planner/stop', { repo }); el.querySelector('#p-stop').hidden = true; el.querySelector('#p-start').textContent = 'Start planning'; el.querySelector('#p-start').disabled = false; el.querySelector('#p-resume').hidden = false; });
   el.querySelector('#p-term').addEventListener('click', async () => { repo = repoInput.value.trim(); const r = await api.post('/api/planner/open-terminal', { repo }); info.textContent = r.ok ? r.note : (r.msg || 'failed'); if (r.ok) connect(); });
+  const KIND_LABEL = {
+    contradiction: ['bad', 'Contradiction'],
+    'unbuilt-promise': ['warn', 'Promised, not built'],
+    'unannounced-surface': ['muted', 'Built, not announced'],
+  };
+
+  function renderMirror(report) {
+    const out = el.querySelector('#p-mirror-out');
+    if (!report) { out.innerHTML = ''; return; }
+    const head = `<div class="muted" style="font-size:12px">${report.issueCount} issue(s) read${report.note ? ` · ${fmt.esc(report.note)}` : ''}</div>`;
+    if (!report.findings.length) {
+      out.innerHTML = `${head}<div class="ok" style="margin-top:6px">${report.parsed ? 'No disagreement a reader would act on.' : 'No usable verdict — nothing should be read from this run.'}</div>${mirrorText(report)}`;
+      return;
+    }
+    const rows = report.findings.map((f) => {
+      const [cls, label] = KIND_LABEL[f.kind] ?? ['muted', f.kind];
+      const quotes = [
+        f.readmeSays ? `<div style="font-size:12px"><b>README:</b> ${fmt.esc(f.readmeSays)}</div>` : '',
+        f.issuesSay ? `<div style="font-size:12px"><b>Issues:</b> ${fmt.esc(f.issuesSay)}</div>` : '',
+      ].join('');
+      const links = f.issues.length ? `<div class="muted" style="font-size:12px">${f.issues.map((n) => `#${n}`).join(', ')}</div>` : '';
+      return `<div style="border-top:1px solid var(--line); padding:6px 0">
+        <div><span class="${cls}">${label}</span> · <b>${fmt.esc(f.subject)}</b></div>
+        ${quotes}<div class="muted" style="font-size:12px">${fmt.esc(f.detail)}</div>${links}</div>`;
+    }).join('');
+    out.innerHTML = head + rows + mirrorText(report);
+  }
+
+  function mirrorText(report) {
+    if (!report.mirror) return '';
+    return `<details style="margin-top:8px"><summary class="muted" style="font-size:12px;cursor:pointer">The README the issues imply</summary>
+      <pre style="white-space:pre-wrap; font-size:12px; margin-top:6px">${fmt.esc(report.mirror)}</pre></details>`;
+  }
+
+  el.querySelector('#p-mirror').addEventListener('click', async () => {
+    repo = repoInput.value.trim();
+    const btn = el.querySelector('#p-mirror'); const msg = el.querySelector('#p-mirror-msg');
+    btn.disabled = true; msg.textContent = 'reading every issue, then writing the README they imply…';
+    try {
+      const r = await api.post('/api/planner/mirror', { repo });
+      msg.textContent = r.ok ? (r.cached ? 'unchanged since the last check' : '') : (r.msg || 'failed');
+      renderMirror(r.ok ? r.report : null);
+    } finally { btn.disabled = false; }
+  });
+
   const send = async () => {
     const t = el.querySelector('#p-text'); const text = t.value.trim(); if (!text) return;
     el.querySelector('#p-send').disabled = true; t.value = '';

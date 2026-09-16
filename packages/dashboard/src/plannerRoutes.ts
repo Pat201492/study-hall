@@ -6,10 +6,10 @@ import { promisify } from 'node:util';
 import {
   BUILTIN_PROVIDERS, defaultHarnessFor, resolveBin, type Ledger, type Harness,
 } from '@study-hall/harness';
-import { fetchIssues, listLabels, repoSlug } from '@study-hall/core/github';
+import { fetchAllIssues, fetchIssues, listLabels, repoSlug } from '@study-hall/core/github';
 import {
   PLAN_ROLE, PlannerSession, PlannerStore, createMcpHandler, createPlannerMcp, fileBatch, lintBatch, loadRubric,
-  mcpClientConfigs, type RepoContext,
+  mcpClientConfigs, runSpecMirror, isFresh, type RepoContext, type IssueDigest, type MirrorPort, type MirrorReport,
 } from '@study-hall/planner';
 import { sideRun } from '@study-hall/harness/ledger/sideRun';
 import type { Router, SseStream } from './router.js';
@@ -251,6 +251,65 @@ export function mountPlanner(router: Router, deps: PlannerDeps): { stop: () => P
     child.unref();
     deps.ledger.recordEvent({ ts: new Date().toISOString(), level: 'info', event: 'planner.terminal', repo: slug, reason: provider });
     return { ok: true, provider, cwd, note: 'A console window opened with the planner role and tools loaded. Drafts you propose there show up here.' };
+  });
+
+  // ---- spec mirror (#22) ---------------------------------------------------
+  // Write the README the ISSUES imply, then compare it with the real one. The
+  // first pass never sees the README: it runs on a prompt built from issue text
+  // with the tool allowlist empty, so the blinding is a property of the call
+  // rather than an instruction a model can ignore.
+  const mirrorCache = new Map<string, MirrorReport>();
+
+  const askOnce = (provider: string, harness: Harness, cwd: string, role: string): MirrorPort => ({
+    provider,
+    model: deps.cfg().models[provider]?.default ?? '',
+    ask: async (prompt) => {
+      const started = Date.now();
+      const r = await harness.run(prompt, {
+        cwd,
+        model: deps.cfg().models[provider]?.default,
+        approval: 'never',
+        sandbox: 'read-only',
+        // No tools at all: this pass reasons over the text it was handed.
+        tools: [],
+        budget: { maxTurns: 1 },
+        idleTicks: 60,
+      });
+      deps.ledger.recordRun(sideRun({
+        role, provider, harness: harness.id, usage: r.usage, startedAt: started, endedAt: Date.now(),
+        meter: r.meter, model: deps.cfg().models[provider]?.default ?? null, sessionId: r.sessionId,
+        turns: r.turns, reportedCostUsd: r.costUsd ?? null, notes: 'spec mirror',
+      }));
+      return r.text;
+    },
+  });
+
+  router.post('/api/planner/mirror', async (ctx) => {
+    const { repo, provider: requested, force } = ctx.body as { repo?: string; provider?: string; force?: boolean };
+    if (!repo) throw new Error('repo is required');
+    const slug = repoSlug(repo);
+    const provider = pickProvider(requested);
+    const harness = defaultHarnessFor(provider);
+    const cwd = await checkoutFor(slug);
+    const raw = await fetchAllIssues(slug);
+    const issues: IssueDigest[] = raw.map((i) => ({
+      number: i.number, title: i.title, body: i.body, state: i.state, merged: i.merged,
+      labels: (i.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name)),
+    }));
+    const readmePath = ['README.md', 'readme.md', 'README'].map((f) => join(cwd, f)).find((f) => existsSync(f));
+    const readme = readmePath ? readFileSync(readmePath, 'utf8') : '';
+
+    const cached = mirrorCache.get(slug) ?? null;
+    if (!force && isFresh(cached, issues, readme)) return { ok: true, report: cached, cached: true };
+
+    const report = await runSpecMirror({ repo: slug, issues, readme, port: askOnce(provider, harness, cwd, 'planner') });
+    mirrorCache.set(slug, report);
+    deps.ledger.recordEvent({
+      ts: new Date().toISOString(), level: report.findings.some((f) => f.kind === 'contradiction') ? 'warn' : 'info',
+      event: 'planner.mirror', repo: slug,
+      reason: `${report.findings.length} finding(s) over ${report.issueCount} issue(s) on ${provider}`,
+    });
+    return { ok: true, report, cached: false };
   });
 
   return {

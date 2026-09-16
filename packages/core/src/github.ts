@@ -113,6 +113,30 @@ export async function openWatchdogReports(
 }
 
 // All OPEN issues for the repo (pull requests are excluded by `gh issue list`).
+/**
+ * Every issue, open and closed, with whether a merged PR closed it.
+ *
+ * The planner's other reader wants open issues only (duplicates, live `Owns:`
+ * claims). The spec mirror wants the whole history, because a mirror built from
+ * open issues alone describes a project nobody has built yet.
+ */
+export async function fetchAllIssues(repo: string, limit = 500): Promise<(RawIssue & { state: 'open' | 'closed'; merged: boolean })[]> {
+  const slug = repoSlug(repo);
+  const out = await gh([
+    'issue', 'list', '-R', slug, '--state', 'all',
+    '--limit', String(limit), '--json', 'number,title,body,labels,state,stateReason,closedByPullRequestsReferences',
+  ]);
+  const raw = JSON.parse(out) as (RawIssue & { state?: string; stateReason?: string | null; closedByPullRequestsReferences?: { number?: number; state?: string }[] })[];
+  return raw.map((i) => ({
+    ...i,
+    body: i.body ?? '',
+    labels: i.labels ?? [],
+    state: (i.state ?? '').toUpperCase() === 'CLOSED' ? 'closed' as const : 'open' as const,
+    // A PR reference alone is not a merge; `gh` reports the PR's own state.
+    merged: (i.closedByPullRequestsReferences ?? []).some((p) => (p.state ?? '').toUpperCase() === 'MERGED'),
+  }));
+}
+
 export async function fetchIssues(repo: string): Promise<RawIssue[]> {
   const slug = repoSlug(repo);
   const out = await gh([
