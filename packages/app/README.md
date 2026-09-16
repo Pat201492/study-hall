@@ -5,3 +5,17 @@
 - `create-desktop-shortcut.ps1` — a Desktop shortcut to `run.cmd`.
 
 `.cmd` files are CRLF-pinned in `.gitattributes`; a LF-only `.cmd` makes `cmd.exe` report the script itself as "not recognized".
+
+## Verified on a real logon (2026-09-15, issue #8)
+
+A logoff/logon cycle on PAT-DESKTOP exercised the whole path:
+
+```
+[Tue 09/15/2026 22:09:45.77] dashboard exited code 1073807364 - Windows session teardown, not restarting
+[Tue 09/15/2026 22:12:40.94] launching dashboard
+```
+
+Logon at 22:12:38, task ran the same second, dashboard launched two seconds later, `/api/health`
+answering. The serving process is parented to the Task Scheduler service and owns no window
+handle, so no console can take it down — which is the whole reason the Scheduled Task is the
+install path rather than a detached spawn.
