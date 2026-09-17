@@ -190,3 +190,18 @@ looking at the diff.
   run locally on Windows, which is the real target.
 - Reading or copying `.credentials.json` / `auth.json`, or setting `CODEX_API_KEY` in a child env.
   Only the unmodified `claude` binary with the user's own login is spawned.
+
+## Configuration
+
+`config.json` is **not** in git and should stay that way: it holds machine paths, and a shared one
+would fight between machines. `config.example.json` IS in git and documents every key, so a fresh
+clone knows the shape without reading `dashboard/src/config.ts`.
+
+Two consequences worth stating, because both have already surprised someone:
+
+- **The boards you add in Settings live only on that machine.** Adding a repo writes `config.json`.
+  Moving to another machine means adding them again.
+- **Anything the app refuses to run without must be committable.** The arena refused to sweep
+  without a committed pre-registration manifest while `.gitignore` excluded the directory it wrote
+  that manifest to, so the guard could never hold and every run passed `--unregistered` instead.
+  A guard that cannot be satisfied is not a guard.

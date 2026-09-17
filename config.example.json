@@ -1,0 +1,26 @@
+{
+  "port": 4800,
+  "repos": [
+    "owner/name"
+  ],
+  "provider": {
+    "default": "auto",
+    "perSurface": {
+      "board": "auto",
+      "planner": "anthropic"
+    },
+    "failoverOrder": ["anthropic", "openai"],
+    "handoverAt": 0.9,
+    "concurrency": { "anthropic": 4, "openai": 2, "local": 1 },
+    "rateLimit": {
+      "anthropic": { "tokensPerHour": 0, "headroom": 0.9 }
+    },
+    "pace": {
+      "anthropic": { "enabled": false, "tolerance": 1.25 }
+    }
+  },
+  "models": {
+    "anthropic": { "default": "sonnet" },
+    "openai": { "default": "gpt-5.6-terra" }
+  }
+}
