@@ -67,6 +67,19 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
     for (const s of quotaStreams) s.send('quota', payload);
   };
 
+  // The monitors are in-memory, so a restart used to lose every reading the
+  // ledger already held and report "unknown, never observed" beside a burn card
+  // that had seeded itself and knew better. Restore the newest stored reading
+  // per provider; the state machine still ages a stale one out to `unknown`, so
+  // this buys back the reading and its true age, not a false claim of freshness.
+  for (const p of BUILTIN_PROVIDERS) {
+    const monitor = p.quota;
+    if (!monitor?.seed) continue;
+    const history = ledger.reader.quotaHistory(p.id, undefined, 1000);
+    const newest = history[history.length - 1];
+    if (newest) monitor.seed(newest);
+  }
+
   if (deps.startCodexQuota !== false) {
     const codexBin = resolveBin('codex');
     if (codexBin.found) {

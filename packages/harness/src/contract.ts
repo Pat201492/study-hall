@@ -70,6 +70,15 @@ export interface QuotaMonitor {
   /** A run failed with a capacity verdict: hold exhausted until `resetAt` (ms). */
   markExhausted(resetAt?: number, detail?: string): void;
   subscribe(fn: (snapshot: QuotaSnapshot) => void): () => void;
+  /**
+   * Restore the newest stored reading at boot, for display only.
+   *
+   * Optional: a monitor that fetches its own state on start (the Codex
+   * app-server) has no use for it. It must never create a hold and never
+   * notify subscribers, or an old exhaustion would be re-applied and the
+   * reading re-banked.
+   */
+  seed?(observation: QuotaObservation): void;
   /** Optional lifecycle for monitors that own a process (Codex app-server). */
   start?(): Promise<void>;
   stop?(): void;

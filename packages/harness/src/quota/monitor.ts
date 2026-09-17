@@ -58,6 +58,27 @@ export class BasicQuotaMonitor implements QuotaMonitor {
     this.emit();
   }
 
+  /**
+   * Restore the last stored reading at boot. Display only.
+   *
+   * The monitor lives in memory, so every restart used to show "unknown, never
+   * observed" while the ledger held real readings and the burn card, which
+   * seeds itself, showed the window at 11 % — two panels on one screen
+   * disagreeing, with the honest one looking broken.
+   *
+   * Three things it deliberately does NOT do:
+   *   - overwrite a live reading; anything observed since boot wins;
+   *   - create a hold from an old `allowed: false`, because an exhaustion from
+   *     yesterday is not an exhaustion now, and the state machine already ages
+   *     a stale reading out to `unknown` on its own;
+   *   - emit, because a subscriber writes observations to the ledger and would
+   *     bank this one a second time.
+   */
+  seed(observation: QuotaObservation): void {
+    if (this.latest) return;
+    this.latest = observation;
+  }
+
   markExhausted(resetAt?: number, detail?: string): void {
     this.hold(resetAt, detail ?? 'capacity failure');
     this.emit();

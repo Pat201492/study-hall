@@ -79,3 +79,45 @@ test('subscribers are told on every observation and a throwing subscriber cannot
   m.observe(obs({ allowed: true, fiveHour: { utilization: 0.1, resetsAt: T0 + 2 * H } }));
   assert.deepEqual(states, ['available', 'exhausted']);
 });
+
+test('a seeded reading survives a restart: the number and its true age come back, freshness does not', () => {
+  // The monitor is in-memory, so a restart showed "unknown, never observed"
+  // beside a burn card that had seeded itself from the same ledger and knew the
+  // window was at 11 %. Seeding restores the reading; the staleness rule still
+  // decides what the state is.
+  let now = T0 + 20 * H;
+  const m = new BasicQuotaMonitor('anthropic', { now: () => now });
+  const stored = obs({ fiveHour: { utilization: 0.11, resetsAt: T0 + 5 * H }, allowed: true }, T0);
+  m.seed(stored);
+  const s = m.snapshot();
+  assert.equal(s.observation?.fiveHour?.utilization, 0.11, 'the last known reading is shown');
+  assert.equal(s.ageMs, 20 * H, 'with its real age, not as if it were fresh');
+  assert.equal(s.state, 'unknown', 'a 20-hour-old reading is not evidence of anything now');
+
+  // Seeded inside the staleness window, it is ordinary evidence again.
+  now = T0 + 10 * 60_000;
+  const fresh = new BasicQuotaMonitor('anthropic', { now: () => now });
+  fresh.seed(stored);
+  assert.equal(fresh.snapshot().state, 'available');
+});
+
+test('seeding never overwrites a live reading, never holds, and never notifies', () => {
+  const now = T0;
+  const m = new BasicQuotaMonitor('anthropic', { now: () => now });
+  const seen: number[] = [];
+  m.subscribe(() => seen.push(1));
+
+  // An old exhaustion is not an exhaustion now: seeding must not re-apply it.
+  m.seed(obs({ allowed: false, fiveHour: { utilization: 1, resetsAt: T0 + H }, detail: 'yesterday' }, T0 - 30 * H));
+  assert.equal(m.snapshot().exhaustedUntil, undefined, 'no hold is created from stored history');
+  assert.equal(m.snapshot().state, 'unknown');
+  // A subscriber banks observations to the ledger; emitting here would bank it twice.
+  assert.equal(seen.length, 0, 'seeding notifies nobody');
+
+  // Anything observed since boot wins, and a later seed cannot undo it.
+  m.observe(obs({ fiveHour: { utilization: 0.2, resetsAt: T0 + 3 * H }, allowed: true }));
+  assert.equal(seen.length, 1);
+  m.seed(obs({ fiveHour: { utilization: 0.9, resetsAt: T0 + 3 * H }, allowed: true }, T0 - H));
+  assert.equal(m.snapshot().observation?.fiveHour?.utilization, 0.2, 'the live reading stands');
+  assert.equal(seen.length, 1);
+});
