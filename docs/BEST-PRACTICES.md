@@ -205,3 +205,14 @@ Two consequences worth stating, because both have already surprised someone:
   without a committed pre-registration manifest while `.gitignore` excluded the directory it wrote
   that manifest to, so the guard could never hold and every run passed `--unregistered` instead.
   A guard that cannot be satisfied is not a guard.
+
+## 13. A seam is not a guard until something is plugged into it
+
+`RunnerDeps.gitLock` existed from the first day of the engine port, was used at every git call
+site, and carried the comment "serialises git operations per clone (worktree add/remove race
+otherwise)". Nothing ever supplied one, so the fallback ran every call unserialised. The race the
+comment predicted then happened on the first real board run and cost a student (#27).
+
+A declared-but-unwired seam reads like protection in every review after it. **Either wire it or
+delete it**, and prefer a test that fails without the wiring: the test here first proves two
+concurrent writers collide without the lock, then that they are ordered with it.

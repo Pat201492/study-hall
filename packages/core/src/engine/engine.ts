@@ -7,6 +7,7 @@ import { tokensProcessed, cacheHitPct } from '@study-hall/harness/pricing';
 import type { Ledger, EventRecord, RunRecord } from '@study-hall/harness/ledger/index';
 import { sideRun } from '@study-hall/harness/ledger/sideRun';
 import { decide, type BoardSnapshot, type CycleConfig, type Decision } from './boardCycle.js';
+import { GitLock } from './gitLock.js';
 import { Governance, type GovernanceVerdict } from './governance.js';
 import { Persistence, type RepoMemory } from './persistence.js';
 import { runRole as realRunRole, realGit, realGitHub, RoleRunError, type GitPort, type GitHubPort, type RoleRunOutput, type RoleRunInput, type RunnerDeps, type DispatchDecision } from './roleRunner.js';
@@ -168,6 +169,10 @@ export class Engine {
   /** Burn-rate governor, one per provider; only capped providers get a tracker. */
   private readonly rate = new Map<string, RateTracker>();
   private readonly rateResting = new Map<string, number | null>();
+  /** One queue per clone, so git's shared metadata is written by one caller at a time. */
+  private readonly gitLock = new GitLock({
+    onRetry: (attempt, waitMs, e) => this.log.warn(`git is locked by another writer (attempt ${attempt}, waiting ${waitMs} ms): ${e.message.split('\n')[0]}`),
+  });
   private readonly restingReason = new Map<string, string>();
   readonly assignments = new AssignmentLog();
   private readonly reporter: Reporter;
@@ -215,8 +220,11 @@ export class Engine {
       const dir = join(this.persist.dirFor(slug), 'repo');
       const configured = `https://github.com/${slug}`;
       this.log.info(`${slug}: cloning → ${dir}`);
-      const clone = await this.opts.ports.git.ensureClone(configured, dir, 'main', cfg.gitIdentity);
-      const reaped = await this.opts.ports.git.reapOrphanWorktrees(clone, []).catch(() => [] as string[]);
+      // Boot is sequential per repo, so this cannot race the engine itself. It
+      // goes through the lock anyway for the retry: another process (the
+      // planner's checkout, a human running git) may hold the config lock.
+      const clone = await this.gitLock.run(dir, () => this.opts.ports.git.ensureClone(configured, dir, 'main', cfg.gitIdentity));
+      const reaped = await this.gitLock.run(dir, () => this.opts.ports.git.reapOrphanWorktrees(clone, [])).catch(() => [] as string[]);
       if (reaped.length) this.log.ok(`${slug}: reaped ${reaped.length} orphan worktree dir(s)`);
       await this.opts.ports.github.ensureLabels(configured)
         .then((made) => { if (made.length) this.log.ok(`${slug}: created missing pipeline label(s): ${made.join(', ')}`); })
@@ -783,6 +791,10 @@ export class Engine {
       onQuota: (o) => this.opts.ports.harnesses.quotaFor(d.provider)?.observe(o),
     }, {
       git: this.opts.ports.runnerGit ?? realGit, gh: this.opts.ports.runnerGitHub ?? realGitHub,
+      // Two students preparing worktrees against one clone race git's config
+      // lock, and the loser fails outright (#27). The runner has always routed
+      // git through this seam; nothing supplied one until now.
+      gitLock: this.gitLock.forClone(rt.clone.dir),
       log: (m) => this.log.info(m), now: this.now, transcriptDir: join(this.persist.stateDir, 'transcripts'),
       generatedFiles: cfg.generatedFiles?.length ? cfg.generatedFiles : undefined,
     }).then((out) => this.onRunDone(rt, d, out), (e) => this.onRunFailed(rt, d, e))
