@@ -14,7 +14,7 @@ import { loadState } from '../src/editorState.js';
 const CAPS: HarnessCapabilities = {
   warmSessions: true, seedableSessions: true, forkSessions: true, cacheUsageSplit: true, usageIsCumulative: false,
   reportsCost: true, toolAllowlist: true, mcpToolAllowlist: true, effortControl: true, sandboxModes: ['none'],
-  promptTransport: 'stdin', streamsUsage: true, cancellable: true, transcripts: true, budgetStop: true, chat: 'stream-json',
+  promptTransport: 'stdin', streamsUsage: true, cancellable: true, transcripts: true, budgetStop: true, contextCompaction: false, chat: 'stream-json',
 };
 const harness: Harness = {
   id: 'fake', provider: 'anthropic', capabilities: CAPS,

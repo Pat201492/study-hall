@@ -15,11 +15,11 @@ import type { Role } from '../src/types.js';
 const CLAUDE_LIKE: HarnessCapabilities = {
   warmSessions: true, seedableSessions: true, forkSessions: true, cacheUsageSplit: true, usageIsCumulative: false,
   reportsCost: true, toolAllowlist: true, mcpToolAllowlist: true, effortControl: true, sandboxModes: ['none'],
-  promptTransport: 'stdin', streamsUsage: true, cancellable: true, transcripts: true, budgetStop: true, chat: 'stream-json',
+  promptTransport: 'stdin', streamsUsage: true, cancellable: true, transcripts: true, budgetStop: true, contextCompaction: false, chat: 'stream-json',
 };
 const CODEX_LIKE: HarnessCapabilities = {
   ...CLAUDE_LIKE, seedableSessions: false, usageIsCumulative: true, reportsCost: false, toolAllowlist: false,
-  sandboxModes: ['workspace-write'], streamsUsage: false, budgetStop: false, chat: 'resume-loop',
+  sandboxModes: ['workspace-write'], streamsUsage: false, budgetStop: false, contextCompaction: false, chat: 'resume-loop',
 };
 
 function fakeHarness(id: string, capabilities: HarnessCapabilities, provider = 'anthropic'): Harness {
@@ -473,4 +473,18 @@ test('no transcript dir means no transcript file and a null path', async () => {
   const out = await run('implement', 1, slot, fakeGit().git, fakeGh().hub);
   assert.equal(out.run?.transcriptPath, null);
   assert.ok(!existsSync('run-implement-1.jsonl'));
+});
+
+// ---- in-session context compaction ------------------------------------------
+
+test('autoCompact reaches the harness, and is absent unless the config set it', async () => {
+  const { slot, calls } = slotFor(fakeHarness('fake-claude', CLAUDE_LIKE), [{}, {}]);
+  const { git } = fakeGit();
+  const { hub } = fakeGh();
+
+  await run('implement', 1, slot, git, hub);
+  assert.equal(calls[0].opts.autoCompact, undefined, 'off unless asked for');
+
+  await run('implement', 2, slot, git, hub, { autoCompact: 200_000 });
+  assert.equal(calls[1].opts.autoCompact, 200_000);
 });

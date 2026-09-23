@@ -6,6 +6,9 @@ import {
   CLAUDE_CODE_CAPABILITIES, claudeArgs, claudeCodeHarness, createClaudeCodeHarness, parseClaudeResult,
   quotaFromRateLimitEvent,
 } from '../src/adapters/claudeCode.js';
+import {
+  AUTO_COMPACT_MAX_TOKENS, AUTO_COMPACT_MIN_TOKENS, autoCompactValue,
+} from '../src/contract.js';
 import { RESET_MARGIN_MS } from '../src/adapters/claudeReset.js';
 import { fidelityFor } from '../src/registry.js';
 
@@ -685,4 +688,42 @@ test('usage always carries all five fields', async () => {
   const r = await harness().run('p', { cwd: '/w', spawnFn });
   const keys: Array<keyof Usage> = ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'reasoningTokens'];
   for (const k of keys) assert.equal(typeof r.usage[k], 'number', k);
+});
+
+// ---- in-session context compaction (trajectory reduction) -------------------
+
+test('autoCompactValue: auto and in-range windows pass; anything else is null', () => {
+  assert.equal(autoCompactValue('auto'), 'auto');
+  assert.equal(autoCompactValue(AUTO_COMPACT_MIN_TOKENS), '100000');
+  assert.equal(autoCompactValue(AUTO_COMPACT_MAX_TOKENS), '1000000');
+  assert.equal(autoCompactValue(200_000), '200000');
+
+  assert.equal(autoCompactValue(undefined), null, 'unset must leave the CLI default');
+  assert.equal(autoCompactValue(AUTO_COMPACT_MIN_TOKENS - 1), null);
+  assert.equal(autoCompactValue(AUTO_COMPACT_MAX_TOKENS + 1), null);
+  assert.equal(autoCompactValue(150_000.5), null, 'a fractional window is not a token count');
+  assert.equal(autoCompactValue(Number.NaN), null);
+  assert.equal(autoCompactValue(Number.POSITIVE_INFINITY), null);
+});
+
+test('claudeArgs: --autocompact is emitted only for a usable window', () => {
+  const tail = (o: Parameters<typeof claudeArgs>[0]) => claudeArgs(o).slice(5);
+  assert.deepEqual(tail({ autoCompact: 'auto' }), ['--autocompact', 'auto']);
+  assert.deepEqual(tail({ autoCompact: 200_000 }), ['--autocompact', '200000']);
+
+  // Out of range runs on the CLI default rather than a window nobody chose —
+  // compacting at an unasked-for point would corrupt the arena's numbers.
+  assert.deepEqual(tail({ autoCompact: 50_000 }), []);
+  assert.deepEqual(tail({}), [], 'off by default');
+});
+
+test('claudeArgs: compaction does not disturb the session flags', () => {
+  assert.deepEqual(claudeArgs({ autoCompact: 200_000, session: { mode: 'fork', base: 'b' } }), [
+    '-p', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions',
+    '--autocompact', '200000', '--resume', 'b', '--fork-session',
+  ]);
+});
+
+test('only the Claude lane declares contextCompaction', () => {
+  assert.equal(CLAUDE_CODE_CAPABILITIES.contextCompaction, true);
 });

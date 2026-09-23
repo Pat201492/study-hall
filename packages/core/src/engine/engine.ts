@@ -781,7 +781,8 @@ export class Engine {
       decision: d, runId, worker: { id: w.id, slot },
       repo: { slug: rt.slug, configured: rt.configured, clone: rt.clone, spec: rt.spec, tasks: rt.tasks, pulls: rt.pulls },
       pool: { approval: pool.approval, sandbox: pool.sandbox, tools: pool.tools },
-      budget: cfg.studentBudget[d.role], rounds: this.gov.watchdog.attemptsFor(d.item), signal: abort.signal,
+      budget: cfg.studentBudget[d.role], autoCompact: cfg.autoCompact,
+      rounds: this.gov.watchdog.attemptsFor(d.item), signal: abort.signal,
       onUsage: (u) => {
         entry.usage = u;
         // Live burn counts the moment it happens: a fleet that starts five warm

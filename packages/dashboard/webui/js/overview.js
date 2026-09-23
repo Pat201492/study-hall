@@ -42,13 +42,7 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
     <h3 style="margin:14px 0 6px">Burn rate — pace the window, fail over before it empties</h3>
     <div class="grid" id="burn"><div class="muted">reading the ledger…</div></div>
     <div class="grid" style="margin-top:12px">
-      <div class="card"><h3>Engine</h3>
-        <div id="engine-line">${engineLine(status.engine, fmt)}</div>
-        <div class="muted" style="margin-top:6px">repos: ${status.repos.length ? status.repos.map(fmt.esc).join(', ') : 'none configured'}</div>
-        <div style="margin-top:10px"><button class="btn" id="eng-start">Start</button> <button class="btn" id="eng-drain" title="Finish in-flight work, start nothing new">Drain</button> <button class="btn" id="eng-stop" title="Tree-kill the engine and its students">Stop</button> <span class="muted" id="eng-msg"></span></div>
-        <div class="kv" style="margin-top:10px"><span>bounded run</span><span><input id="br-n" type="number" min="0" style="width:60px" value="${status.engine.boundedRun?.limit ?? 5}"> <select id="br-unit"><option value="pr">PRs</option><option value="merge">merges</option></select> <button class="btn" id="br-save">Save</button></span></div>
-        <div class="muted" style="font-size:12px">0 = unbounded (every expensive incident was one). Takes effect on the next start.</div>
-        <pre class="log" id="eng-log" style="margin-top:8px;max-height:160px;overflow:auto"></pre></div>
+      ${engineCard(status, fmt)}
       <div class="card"><h3>Provider in force per surface</h3>
         ${Object.entries(eff).map(([s, c]) => `<div class="kv"><span>${s}</span><span class="pill ${c === 'auto' ? '' : c}">${c === 'auto' ? 'Both (failover ' + (status.provider.failoverOrder || []).join(' → ') + ')' : c === 'anthropic' ? 'Claude' : 'ChatGPT'}</span></div>`).join('')}
         <div class="muted" style="margin-top:6px">Claude hands over at ${Math.round((status.provider.handoverAt ?? 0.9) * 100)}% of its limiting window; ChatGPT on <span class="mono">ordinaryUsageAllowed=false</span>.</div></div>
@@ -223,6 +217,24 @@ function engineLine(e, fmt) {
   if (e.boundedRun) parts.push(`bounded ${e.boundedRun.done}/${e.boundedRun.limit} ${e.boundedRun.unit}s`);
   if (e.drainRequested) parts.push('<span class="warn">draining</span>');
   return parts.join(' · ');
+}
+
+/**
+ * The Engine card: state, repos, start/drain/stop, the bounded-run cap and the log tail.
+ *
+ * Shared rather than copied, because it is rendered on two screens now: the
+ * Overview, and the Pool tab under the students it governs. One definition
+ * means the two can never drift into showing different controls for one engine.
+ * Both call `wireEngineControls` on the container after rendering.
+ */
+export function engineCard(status, fmt) {
+  return `  <div class="card"><h3>Engine</h3>
+    <div id="engine-line">${engineLine(status.engine, fmt)}</div>
+    <div class="muted" style="margin-top:6px">repos: ${status.repos.length ? status.repos.map(fmt.esc).join(', ') : 'none configured'}</div>
+    <div style="margin-top:10px"><button class="btn" id="eng-start">Start</button> <button class="btn" id="eng-drain" title="Finish in-flight work, start nothing new">Drain</button> <button class="btn" id="eng-stop" title="Tree-kill the engine and its students">Stop</button> <span class="muted" id="eng-msg"></span></div>
+    <div class="kv" style="margin-top:10px"><span>bounded run</span><span><input id="br-n" type="number" min="0" style="width:60px" value="${status.engine.boundedRun?.limit ?? 5}"> <select id="br-unit"><option value="pr">PRs</option><option value="merge">merges</option></select> <button class="btn" id="br-save">Save</button></span></div>
+    <div class="muted" style="font-size:12px">0 = unbounded (every expensive incident was one). Takes effect on the next start.</div>
+    <pre class="log" id="eng-log" style="margin-top:8px;max-height:160px;overflow:auto"></pre></div>`;
 }
 
 export function wireEngineControls(el, { api, fmt, refreshStatus }) {

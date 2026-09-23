@@ -10,7 +10,7 @@ const caps: HarnessCapabilities = {
   warmSessions: false, seedableSessions: false, forkSessions: false, cacheUsageSplit: false,
   usageIsCumulative: false, reportsCost: false, toolAllowlist: false, mcpToolAllowlist: false,
   effortControl: false, sandboxModes: ['none'], promptTransport: 'stdin', streamsUsage: false,
-  cancellable: false, transcripts: false, budgetStop: false, chat: 'none',
+  cancellable: false, transcripts: false, budgetStop: false, contextCompaction: false, chat: 'none',
 };
 
 function provider(id: string, over: Partial<Provider> = {}): Provider {

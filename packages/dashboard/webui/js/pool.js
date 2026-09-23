@@ -3,6 +3,8 @@
 // come from the engine's status.json; ladder tallies come from the LEDGER so
 // they survive restarts (process memory does not).
 
+import { engineCard, wireEngineControls } from './overview.js';
+
 function studentRow(s, fmt) {
   const warm = s.warm ? `<span class="ok" title="${fmt.esc(s.baseSessionId ?? '')}">warm</span>` : '<span class="muted">cold</span>';
   const item = s.repo && s.item != null ? `${fmt.esc(s.repo)}#${s.item}` : '<span class="muted">—</span>';
@@ -37,10 +39,10 @@ function ladderCard(title, t, note) {
     ${note ? `<div class="muted" style="margin-top:6px">${note}</div>` : ''}</div>`;
 }
 
-export async function renderPool(el, { api, fmt }) {
+export async function renderPool(el, { api, fmt, refreshStatus }) {
   el.innerHTML = '<div class="empty">loading pool…</div>';
   async function load() {
-    const [pool, attribution] = await Promise.all([api.get('/api/pool'), api.get('/api/attribution')]);
+    const [pool, attribution, status] = await Promise.all([api.get('/api/pool'), api.get('/api/attribution'), api.get('/api/status')]);
     const e = pool.engine;
     const line = e.running
       ? `engine <span class="ok">running</span>${e.live ? ` · tick ${e.tick} · ${fmt.ago(Date.now() - Date.parse(e.updatedAt))}` : ' · <span class="warn">no fresh snapshot yet</span>'}${pool.parallelism ? ` · parallelism ${pool.parallelism.effective}/${pool.parallelism.configured}${pool.parallelism.effective < pool.parallelism.configured ? ' <span class="warn">(throttled)</span>' : ''}` : ''}${pool.capacity ? ` · <span class="warn">paused: ${fmt.esc(pool.capacity.reason)} until ${new Date(pool.capacity.pausedUntil).toLocaleTimeString()}</span>` : ''}`
@@ -61,8 +63,12 @@ export async function renderPool(el, { api, fmt }) {
           <table style="margin-top:8px"><thead><tr><th>role</th><th>tier</th><th>provider</th><th>tasks</th><th>tokens</th><th>est. $</th></tr></thead><tbody>
             ${attribution.slice(0, 30).map((r) => `<tr><td>${fmt.esc(r.role)}</td><td>${fmt.esc(r.tier ?? '—')}</td><td><span class="pill ${r.provider}">${r.provider}</span></td><td>${r.count}</td><td class="mono">${fmt.tok(r.sumTokensProcessed)}</td><td class="mono">${fmt.usd(r.sumEstimatedCostUsd)}</td></tr>`).join('')}
           </tbody></table></div>
-      </div>`;
+      </div>
+      <h3 style="margin:16px 0 6px">Engine</h3>
+      <div class="grid">${engineCard(status, fmt)}</div>`;
     el.querySelector('#reload')?.addEventListener('click', load);
+    // Re-wired on every refresh, because this whole panel is re-rendered.
+    wireEngineControls(el, { api, fmt, refreshStatus });
   }
   await load();
   const t = setInterval(load, 5_000);

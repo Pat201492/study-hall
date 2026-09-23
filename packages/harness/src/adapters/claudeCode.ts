@@ -4,6 +4,7 @@ import type {
   HarnessRunOptions, HarnessRunResult, MeterKind, PreflightResult, QuotaMonitor,
   QuotaObservation, QuotaWindow, SpawnLike, Usage,
 } from '../contract.js';
+import { autoCompactValue } from '../contract.js';
 import { attachGuards } from '../guards.js';
 import { NdjsonFramer, num } from '../ndjson.js';
 import { ChildRegistry, resolveBin as defaultResolveBin, type ResolvedBin } from '../proc.js';
@@ -70,10 +71,12 @@ export const CLAUDE_CODE_CAPABILITIES: HarnessCapabilities = Object.freeze({
   cancellable: true,
   transcripts: true,
   budgetStop: true,
+  contextCompaction: true,
   chat: 'stream-json',
 }) as HarnessCapabilities;
 
-export type ClaudeArgOptions = Pick<HarnessRunOptions, 'model' | 'effort' | 'approval' | 'tools' | 'session'>;
+export type ClaudeArgOptions =
+  Pick<HarnessRunOptions, 'model' | 'effort' | 'approval' | 'tools' | 'session' | 'autoCompact'>;
 
 /**
  * The argv for one `claude -p` run. Prompt-independent: the prompt goes over
@@ -99,6 +102,12 @@ export function claudeArgs(opts: ClaudeArgOptions): string[] {
     ? ['--dangerously-skip-permissions']
     : ['--permission-mode', 'acceptEdits'];
   const toolList = opts.tools && opts.tools.length ? ['--tools', ...opts.tools] : [];
+  // `--autocompact auto|100k-1M`: compact the trajectory in place once the
+  // window fills, instead of carrying every tool result to the end of the task.
+  // Omitted when unset or out of range, so an unusable value runs on the CLI
+  // default rather than a window nobody chose (see autoCompactValue).
+  const compactValue = autoCompactValue(opts.autoCompact);
+  const compact = compactValue ? ['--autocompact', compactValue] : [];
   const s = opts.session;
   const session = !s ? []
     : s.mode === 'new' ? (s.seed ? ['--session-id', s.seed] : [])
@@ -110,6 +119,7 @@ export function claudeArgs(opts: ClaudeArgOptions): string[] {
     ...(opts.model ? ['--model', opts.model] : []),
     ...(opts.effort ? ['--effort', opts.effort] : []),
     ...toolList,
+    ...compact,
     ...session,
   ];
 }

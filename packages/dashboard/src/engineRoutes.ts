@@ -9,6 +9,7 @@ import { classify, isParked, parkedItems, deadlockedPulls, pullIssueNumber, PARK
 import { fetchIssues, listOpenPulls, removeLabel, parseDeps, repoSlug, type RawIssue, type OpenPull } from '@study-hall/core/github';
 import { loadEngineConfig } from '@study-hall/core/config';
 import { assessRate, hasCap, resolveLimit, suggestTokensPerHour, DEFAULT_WINDOW_MS, type RateLimit } from '@study-hall/core/rateBudget';
+import { planLayout, type PlanLayout } from '@study-hall/core/planGraph';
 import { assessPace, paceSamples, DEFAULT_PACE } from '@study-hall/core/windowPace';
 import { estimateWindowCapacity, sustainableTokensPerHour } from '@study-hall/core/windowCapacity';
 import { requestDrain, clearDrain, drainRequested } from '@study-hall/core/drain';
@@ -60,6 +61,8 @@ export interface BoardView extends Omit<RepoStatus, 'attempts'> {
   attempts: Record<string, number>;
   /** Whether the engine's snapshot (in-flight, attempts) was merged in. */
   fromEngine: boolean;
+  /** The same board as build-order waves; absent when the fetch failed. */
+  plan?: PlanLayout;
 }
 
 const STALE_MS = 90_000;
@@ -248,6 +251,16 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
         parked: parkedItems(issues, pulls).map((p) => ({ repo: slug, number: p.number, target: p.target, title: p.title, labels: p.labels, attempts: attempts[`${slug}:${p.target}-${p.number}`] ?? 0 })),
         deadlocked: deadlockedPulls(pulls).map((p) => ({ repo: slug, number: p.number, title: p.title, labels: p.labels.filter((l) => l === 'reviewed-ok' || isParked([l])) })),
         attempts, counts: { issues: issues.length, pulls: pulls.length }, fromEngine,
+        // The same board as a build-order chart. Computed here, with the layout
+        // maths in core where it has tests, so the page only has to draw it.
+        plan: planLayout(issues.map((i) => {
+          const labels = i.labels.map((l) => l.name);
+          const stage = isParked(labels) ? 'parked' as const
+            : inPr.has(i.number) ? 'in-pr' as const
+              : readyNums.has(i.number) ? 'ready' as const
+                : 'blocked' as const;
+          return { number: i.number, title: i.title, stage, deps: parseDeps(i.body).map((d) => Number(d.slice(1))).filter(Number.isFinite) };
+        })),
       };
     } catch (e) {
       // Keep the engine's last view when we have one; never blank the other boards.

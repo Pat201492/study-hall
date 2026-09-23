@@ -56,6 +56,7 @@ export const CODEX_CAPABILITIES: HarnessCapabilities = {
   cancellable: true,
   transcripts: true,
   budgetStop: false,
+  contextCompaction: false,
   chat: 'resume-loop',
 };
 

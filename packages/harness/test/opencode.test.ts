@@ -522,6 +522,7 @@ test('capabilities are declared honestly', () => {
     cancellable: true,
     transcripts: true,
     budgetStop: true,
+    contextCompaction: false,
     chat: 'none',
   });
   assert.equal(fidelityFor(OPENCODE_CAPABILITIES), 'exact', 'it does report the cache split');

@@ -2,7 +2,7 @@ import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type {
-  FailureVerdict, QuotaObservation, StudentBudget, Usage, HarnessRunResult,
+  AutoCompact, FailureVerdict, QuotaObservation, StudentBudget, Usage, HarnessRunResult,
 } from '@study-hall/harness/contract';
 import { ZERO_USAGE } from '@study-hall/harness/contract';
 import type { WarmSlot } from '@study-hall/harness/warmSlot';
@@ -124,6 +124,9 @@ export interface RoleRunInput {
   repo: RepoContext;
   pool: Pick<ProviderPoolConfig, 'approval' | 'sandbox' | 'tools'>;
   budget?: StudentBudget;
+  /** In-session context compaction window, off unless the engine config set it.
+   *  A harness that cannot compact ignores it (capabilities.contextCompaction). */
+  autoCompact?: AutoCompact;
   /** Failed review rounds so far — the rewrite prompt states it. */
   rounds?: number;
   signal?: AbortSignal;
@@ -344,7 +347,7 @@ export async function runRole(input: RoleRunInput, deps: RunnerDeps = {}): Promi
           cwd: dir!, model: decision.model, effort: decision.effort,
           approval: input.pool.approval, sandbox: input.pool.sandbox,
           tools: input.pool.tools?.length ? [...input.pool.tools] : undefined,
-          budget: input.budget, signal: input.signal,
+          budget: input.budget, autoCompact: input.autoCompact, signal: input.signal,
           transcriptSink: t ? (line) => { t.write(`${line}\n`); } : undefined,
           onUsage: input.onUsage, onQuota: input.onQuota,
           onBudgetStop: (b) => log(`${repo.slug}#${a.number} stopped at ${b.limit} (${b.turns} turns, ${(b.tokens / 1e6).toFixed(1)}M tokens) — banking partial work`),

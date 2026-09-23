@@ -152,6 +152,7 @@ export const OPENCODE_CAPABILITIES: HarnessCapabilities = {
   cancellable: true,
   transcripts: true,
   budgetStop: true,
+  contextCompaction: false,
   chat: 'none',
 };
 

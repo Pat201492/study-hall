@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { StudentBudget, Sandbox, Approval } from '@study-hall/harness/contract';
+import type { AutoCompact, StudentBudget, Sandbox, Approval } from '@study-hall/harness/contract';
 import type { WatchdogConfig } from './watchdog.js';
 import type { ThrottleConfig } from './throttle.js';
 import { DEFAULT_BLACKOUT, type BlackoutConfig } from './blackout.js';
@@ -63,6 +63,15 @@ export interface EngineConfig {
   generatedFiles?: GeneratedFileRule[];
   studentBudget: Partial<Record<Role, StudentBudget>>;
   acTiering: AcTieringConfig;
+  /**
+   * In-session context compaction (trajectory reduction), OFF by default.
+   *
+   * `'auto'` or a 100k-1M token window; the Claude lane maps it to
+   * `--autocompact`, lanes that declare `contextCompaction: false` ignore it.
+   * Unset rather than defaulted because the saving is a claim this board has
+   * not yet measured — turn it on for an arena arm, not for the whole pool.
+   */
+  autoCompact?: AutoCompact;
   boundedRun: BoundedRunConfig;
   /** Heartbeat period. v1 drained the GitHub API at 2 s; 20 s is measured-safe. */
   pollMs: number;

@@ -112,6 +112,39 @@ export const ZERO_USAGE: Readonly<Usage> = Object.freeze({
   inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0,
 });
 
+/**
+ * In-session context compaction: `'auto'` for the CLI's own window, or an
+ * explicit token window at which the conversation is compacted in place.
+ *
+ * NOT a budget cap, and the difference is the whole reason this is safe to try.
+ * A cap STOPS a run; the work resumes in a fresh session that re-reads the repo
+ * from cold, which is what moved cost from 9.5M to 20.5M tokens per merged PR.
+ * Compaction summarises the trajectory INSIDE one live session — no second
+ * session, no second repo ramp-up — so it reduces input tokens without buying
+ * back the split-session penalty. That is the claim; `study-arena` decides
+ * whether it holds on this board, which is why this ships off by default.
+ */
+export type AutoCompact = 'auto' | number;
+
+/** The window bounds the Claude CLI accepts for `--autocompact`. */
+export const AUTO_COMPACT_MIN_TOKENS = 100_000;
+export const AUTO_COMPACT_MAX_TOKENS = 1_000_000;
+
+/**
+ * The flag value for a requested window, or null when it is unusable.
+ *
+ * Null rather than a clamp: a window outside the CLI's range is a config
+ * mistake, and silently compacting at a window nobody chose would corrupt the
+ * arena's numbers with a setting the prereg never named.
+ */
+export function autoCompactValue(v: AutoCompact | undefined): string | null {
+  if (v === undefined) return null;
+  if (v === 'auto') return 'auto';
+  if (!Number.isFinite(v) || !Number.isInteger(v)) return null;
+  if (v < AUTO_COMPACT_MIN_TOKENS || v > AUTO_COMPACT_MAX_TOKENS) return null;
+  return String(v);
+}
+
 /** A ceiling on what one run may spend before it is stopped and its partial work
  *  banked. Both limits are OFF when 0/undefined; whichever trips first wins. */
 export interface StudentBudget {
@@ -157,6 +190,15 @@ export interface HarnessCapabilities {
   /** Can be stopped on a turn/token budget with partial work banked. Always true
    *  when `streamsUsage` is true, because the generic guard enforces it. */
   budgetStop: boolean;
+  /** Accepts an in-session context-compaction setting (Claude `--autocompact`).
+   *
+   *  This is the only trajectory-reduction seam a CLI-backed harness has. The
+   *  agent's conversation lives inside the CLI process, so an orchestrator
+   *  cannot prune it from outside the way AgentDiet-style trajectory reduction
+   *  assumes; it can only ask the CLI to compact at a chosen window. A harness
+   *  without such a flag declares `false` and runs on its own default.
+   */
+  contextCompaction: boolean;
   /** Interactive planner transport this harness offers. */
   chat: ChatTransport;
 }
@@ -183,6 +225,9 @@ export interface HarnessRunOptions {
   tools?: string[];
   session?: SessionSpec;
   budget?: StudentBudget;
+  /** In-session context compaction. Ignored by a harness whose capabilities
+   *  report `contextCompaction: false`, never emitted blind. */
+  autoCompact?: AutoCompact;
   /** Consecutive silent minutes before the run is killed as stalled. 0 disables.
    *  Defaults to DEFAULT_IDLE_TICKS. */
   idleTicks?: number;

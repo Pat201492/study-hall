@@ -40,16 +40,101 @@ function repoCard(b, fmt) {
   </div>`;
 }
 
+
+// ---- chart view ----------------------------------------------------------
+// The same board as build order, ported from v1's Plan screen: one column per
+// dependency wave, an arrow per "unblocks", colour by stage. The layout maths
+// lives in core (planGraph.ts) where it has tests; this only draws.
+
+const STAGE_COLOR = { ready: 'var(--ok)', 'in-pr': 'var(--auto)', blocked: 'var(--muted)', parked: 'var(--warn)' };
+const NW = 210, NH = 46, CW = 276, RG = 66, MX = 20, MY = 54;
+
+function planSvg(plan, fmt) {
+  const cols = plan.columns.filter((c) => c.length);
+  if (!cols.length) return '<div class="muted">No open issues to plan.</div>';
+  const rows = Math.max(...cols.map((c) => c.length));
+  const W = MX * 2 + cols.length * CW - (CW - NW);
+  const H = MY + rows * RG + 12;
+  const pos = new Map();
+  cols.forEach((c, li) => c.forEach((n, ri) => pos.set(n.number, { x: MX + li * CW, y: MY + ri * RG })));
+
+  const edges = [];
+  for (const c of cols) {
+    for (const n of c) {
+      for (const d of n.openDeps) {
+        const a = pos.get(d); const b = pos.get(n.number);
+        if (!a || !b) continue;
+        // Right edge of the dependency to the left edge of the dependant.
+        const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x - 6, y2 = b.y + NH / 2;
+        const mid = x1 + Math.max(18, (x2 - x1) / 2);
+        edges.push(`<path d="M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2} ${y2}" fill="none" stroke="var(--line)" stroke-width="1.5" marker-end="url(#ah)"/>`);
+      }
+    }
+  }
+
+  const heads = cols.map((c, li) => `<text x="${MX + li * CW}" y="30" fill="var(--muted)" font-size="11" font-weight="700">${li === 0 ? 'BUILDABLE NOW' : `AFTER WAVE ${li}`}</text>`).join('');
+  const nodes = cols.map((c) => c.map((n) => {
+    const p = pos.get(n.number);
+    const color = STAGE_COLOR[n.stage] ?? 'var(--muted)';
+    // A thick border is the engine's verdict that this is startable right now,
+    // which is not the same as sitting in the first column.
+    const stroke = n.inCycle ? 'var(--bad)' : n.stage === 'ready' ? 'var(--ok)' : 'var(--line)';
+    const width = n.stage === 'ready' || n.inCycle ? 2 : 1;
+    const title = n.title.length > 30 ? `${n.title.slice(0, 29)}…` : n.title;
+    return `<g><title>#${fmt.esc(String(n.number))} ${fmt.esc(n.title)} — ${n.stage}${n.inCycle ? ' · in a dependency cycle' : ''}</title>
+      <rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="8" fill="var(--panel)" stroke="${stroke}" stroke-width="${width}"/>
+      <circle cx="${p.x + 14}" cy="${p.y + NH / 2}" r="4" fill="${color}"/>
+      <text x="${p.x + 26}" y="${p.y + 19}" fill="var(--text)" font-size="12" font-weight="600">#${n.number}</text>
+      <text x="${p.x + 26}" y="${p.y + 34}" fill="var(--muted)" font-size="11">${fmt.esc(title)}</text>
+    </g>`;
+  }).join('')).join('');
+
+  return `<div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" style="min-width:${Math.min(W, 560)}px;width:${W}px;max-width:100%;height:auto">
+    <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--line)"/></marker></defs>
+    ${heads}${edges.join('')}${nodes}
+  </svg></div>`;
+}
+
+function planCard(b, fmt) {
+  const head = `<div class="kv"><h2>${fmt.esc(b.repo)}</h2><span class="muted">${b.plan ? `${b.plan.total} open · ${b.plan.buildableNow} buildable now · ${b.plan.waves} wave${b.plan.waves === 1 ? '' : 's'}` : ''}</span></div>`;
+  if (b.error && !b.plan) return `<div class="card">${head}<div class="bad">fetch failed: ${fmt.esc(b.error)}</div></div>`;
+  if (!b.plan) return `<div class="card">${head}<div class="muted">no plan available — the engine's cached view has no issue bodies to read dependencies from</div></div>`;
+  const cycles = b.plan.cycles.length
+    ? `<div class="bad" style="margin-bottom:8px">Dependency cycle: ${b.plan.cycles.map((n) => `#${n}`).join(', ')}. This board cannot drain until a human breaks it.</div>`
+    : '';
+  const key = '<div class="muted" style="font-size:12px;margin-top:8px">Colour is stage: green ready, blue in a PR, amber parked, grey blocked. A green border is startable right now. An arrow means "unblocks".</div>';
+  return `<div class="card">${head}${cycles}${planSvg(b.plan, fmt)}${key}</div>`;
+}
+
 export async function renderBoards(el, { api, fmt }) {
   el.innerHTML = '<div class="empty">loading boards…</div>';
+  let mode = 'list';
+  try { mode = localStorage.getItem('sh.boards.view') === 'chart' ? 'chart' : 'list'; } catch { /* private window */ }
   async function load() {
     const data = await api.get('/api/boards');
     const e = data.engine;
     const line = e.running
       ? `engine <span class="ok">running</span>${e.live ? ` · tick ${e.tick} · ${fmt.ago(Date.now() - Date.parse(e.updatedAt))}` : ' · <span class="warn">no fresh snapshot yet</span>'}${e.boundedRun ? ` · bounded ${e.boundedRun.done}/${e.boundedRun.limit} ${e.boundedRun.unit}s` : ''}${e.lastTick ? ` · last tick: ${e.lastTick.dispatched} dispatched, ${e.lastTick.acted} acted, ${e.lastTick.held} held` : ''}`
       : 'engine <span class="muted">stopped</span> — boards shown live from GitHub';
-    el.innerHTML = `<div class="kv muted" style="margin-bottom:10px"><span>${line}</span><button class="btn" id="reload">Refresh</button></div>
-      <div class="grid">${data.repos.length ? data.repos.map((b) => repoCard(b, fmt)).join('') : '<div class="empty">No repos configured. Add one in Settings.</div>'}</div>`;
+    const cards = data.repos.length
+      ? data.repos.map((b) => (mode === 'chart' ? planCard(b, fmt) : repoCard(b, fmt))).join('')
+      : '<div class="empty">No repos configured. Add one in Settings.</div>';
+    el.innerHTML = `<div class="kv muted" style="margin-bottom:10px"><span>${line}</span><span>
+        <span class="provider-toggle" style="display:inline-flex;gap:4px;margin-right:8px">
+          <button id="mode-list" class="${mode === 'list' ? 'active' : ''}">List</button>
+          <button id="mode-chart" class="${mode === 'chart' ? 'active' : ''}">Build order</button>
+        </span>
+        <button class="btn" id="reload">Refresh</button></span></div>
+      <div class="grid"${mode === 'chart' ? ' style="grid-template-columns:1fr"' : ''}>${cards}</div>`;
+    // The choice is per viewer and survives a reload; it is a preference, not state.
+    for (const m of ['list', 'chart']) {
+      el.querySelector(`#mode-${m}`)?.addEventListener('click', () => {
+        if (mode === m) return;
+        mode = m;
+        try { localStorage.setItem('sh.boards.view', m); } catch { /* private window */ }
+        load();
+      });
+    }
     el.querySelector('#reload')?.addEventListener('click', load);
     el.querySelectorAll('button[data-unpark]').forEach((b) => b.addEventListener('click', async () => {
       const [repo, number, target, label] = b.dataset.unpark.split('|');

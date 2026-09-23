@@ -19,7 +19,7 @@ import type { RawIssue, OpenPull } from '../src/github.js';
 const CAPS: HarnessCapabilities = {
   warmSessions: true, seedableSessions: true, forkSessions: true, cacheUsageSplit: true, usageIsCumulative: false,
   reportsCost: true, toolAllowlist: true, mcpToolAllowlist: true, effortControl: true, sandboxModes: ['none'],
-  promptTransport: 'stdin', streamsUsage: true, cancellable: true, transcripts: true, budgetStop: true, chat: 'stream-json',
+  promptTransport: 'stdin', streamsUsage: true, cancellable: true, transcripts: true, budgetStop: true, contextCompaction: false, chat: 'stream-json',
 };
 
 function fakeHarness(id: string, provider: string, preflightOk = true): Harness {
