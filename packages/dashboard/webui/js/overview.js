@@ -54,6 +54,8 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
   // from has to show that reading. It used to call refreshStatus(), which only
   // repaints the header, leaving the bars saying "No window observed yet" after
   // a probe that had in fact just observed one.
+  let probing = false;
+
   function paintProviders(providers) {
     el.querySelector('#providers').innerHTML = providers.map((p) => providerCard(p, fmt)).join('');
     bindProbes();
@@ -62,7 +64,8 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
   function bindProbes() {
     el.querySelectorAll('button[data-probe]').forEach((b) => b.addEventListener('click', async () => {
       const id = b.dataset.probe; const msg = el.querySelector(`#probe-${id}`);
-      b.disabled = true; msg.textContent = id === 'anthropic' ? 'running one haiku turn…' : 'reading app-server…';
+      b.disabled = true; probing = true;
+      msg.textContent = id === 'anthropic' ? 'running one haiku turn…' : 'reading app-server…';
       try {
         const r = await api.post(`/api/quota/probe/${id}`);
         if (!r.ok) { msg.textContent = r.msg || 'failed'; b.disabled = false; return; }
@@ -76,6 +79,8 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
       } catch (e) {
         msg.textContent = String(e);
         b.disabled = false;
+      } finally {
+        probing = false;
       }
     }));
   }
@@ -90,12 +95,18 @@ export async function renderOverview(el, { api, fmt, refreshStatus }) {
   const stopBurn = wireBurn(el, { api, fmt });
 
   // Live quota via SSE; re-render only the provider cards.
+  //
+  // Through paintProviders, never by hand: this used to rewrite the cards and
+  // then rebind every probe button to `location.reload()`. After the first
+  // stream tick — which arrives on a heartbeat, so within seconds of opening
+  // the tab — pressing "Probe now" reloaded the page and ran no probe at all.
+  // One renderer, one binding path, or the older one silently wins.
   const es = new EventSource('/api/quota/stream');
   es.addEventListener('quota', (ev) => {
-    const providers = JSON.parse(ev.data);
-    const box = el.querySelector('#providers');
-    if (box) box.innerHTML = providers.map((p) => providerCard(p, fmt)).join('');
-    el.querySelectorAll('button[data-probe]').forEach((b) => b.addEventListener('click', () => location.reload()));
+    // A repaint mid-probe would yank the card out from under the run in flight
+    // and re-enable the button while a turn is still going.
+    if (probing) return;
+    paintProviders(JSON.parse(ev.data));
   });
   return () => { es.close(); stopEngineTail(); stopBurn(); };
 }
