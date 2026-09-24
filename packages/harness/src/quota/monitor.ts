@@ -66,17 +66,26 @@ export class BasicQuotaMonitor implements QuotaMonitor {
    * seeds itself, showed the window at 11 % — two panels on one screen
    * disagreeing, with the honest one looking broken.
    *
+   * Also how a reading observed in ANOTHER PROCESS arrives. The engine runs as
+   * its own process: its students' rate-limit events feed the engine's monitor
+   * and land in the ledger, and this one never saw them. Seeded only at boot,
+   * the card sat 13 hours stale while the ledger held readings from minutes ago.
+   * The dashboard follows the ledger and seeds what it finds.
+   *
+   * Returns whether anything changed, so a follower knows when to notify.
+   *
    * Three things it deliberately does NOT do:
-   *   - overwrite a live reading; anything observed since boot wins;
+   *   - go backwards; only a strictly newer reading replaces the current one;
    *   - create a hold from an old `allowed: false`, because an exhaustion from
    *     yesterday is not an exhaustion now, and the state machine already ages
    *     a stale reading out to `unknown` on its own;
    *   - emit, because a subscriber writes observations to the ledger and would
    *     bank this one a second time.
    */
-  seed(observation: QuotaObservation): void {
-    if (this.latest) return;
+  seed(observation: QuotaObservation): boolean {
+    if (this.latest && observation.observedAt <= this.latest.observedAt) return false;
     this.latest = observation;
+    return true;
   }
 
   markExhausted(resetAt?: number, detail?: string): void {

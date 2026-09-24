@@ -101,6 +101,26 @@ test('a seeded reading survives a restart: the number and its true age come back
   assert.equal(fresh.snapshot().state, 'available');
 });
 
+test('a newer reading from another process is adopted; an older one is ignored', () => {
+  // The engine is its own process: its students' readings reach the ledger and
+  // never this monitor. Seeded only at boot, the card sat 13 hours stale while
+  // the ledger held readings from minutes earlier (#37).
+  let now = T0 + 60_000;
+  const m = new BasicQuotaMonitor('anthropic', { now: () => now });
+  assert.equal(m.seed(obs({ fiveHour: { utilization: 0.4, resetsAt: T0 + 5 * H }, allowed: true }, T0)), true);
+  assert.equal(m.snapshot().observation?.fiveHour?.utilization, 0.4);
+
+  // Mid-run, the ledger has something newer.
+  assert.equal(m.seed(obs({ fiveHour: { utilization: 0.6, resetsAt: T0 + 5 * H }, allowed: true }, T0 + 30_000)), true);
+  assert.equal(m.snapshot().observation?.fiveHour?.utilization, 0.6);
+  assert.equal(m.snapshot().state, 'available', 'and it drives state, not just the display');
+
+  // A row read again, or one that arrives out of order, changes nothing.
+  assert.equal(m.seed(obs({ fiveHour: { utilization: 0.1, resetsAt: T0 + 5 * H }, allowed: true }, T0 + 30_000)), false);
+  assert.equal(m.seed(obs({ fiveHour: { utilization: 0.1, resetsAt: T0 + 5 * H }, allowed: true }, T0)), false);
+  assert.equal(m.snapshot().observation?.fiveHour?.utilization, 0.6, 'the clock only moves forwards');
+});
+
 test('seeding never overwrites a live reading, never holds, and never notifies', () => {
   const now = T0;
   const m = new BasicQuotaMonitor('anthropic', { now: () => now });
@@ -117,7 +137,9 @@ test('seeding never overwrites a live reading, never holds, and never notifies',
   // Anything observed since boot wins, and a later seed cannot undo it.
   m.observe(obs({ fiveHour: { utilization: 0.2, resetsAt: T0 + 3 * H }, allowed: true }));
   assert.equal(seen.length, 1);
+  // An OLDER seed cannot undo a live reading; a newer one is simply the truth
+  // arriving from the process that took it.
   m.seed(obs({ fiveHour: { utilization: 0.9, resetsAt: T0 + 3 * H }, allowed: true }, T0 - H));
   assert.equal(m.snapshot().observation?.fiveHour?.utilization, 0.2, 'the live reading stands');
-  assert.equal(seen.length, 1);
+  assert.equal(seen.length, 1, 'and seeding still notifies nobody, so nothing is re-banked');
 });

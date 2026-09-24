@@ -71,14 +71,16 @@ export interface QuotaMonitor {
   markExhausted(resetAt?: number, detail?: string): void;
   subscribe(fn: (snapshot: QuotaSnapshot) => void): () => void;
   /**
-   * Restore the newest stored reading at boot, for display only.
+   * Adopt a reading observed elsewhere — the ledger at boot, or another process
+   * mid-run — for display only. Returns whether anything changed.
    *
    * Optional: a monitor that fetches its own state on start (the Codex
-   * app-server) has no use for it. It must never create a hold and never
-   * notify subscribers, or an old exhaustion would be re-applied and the
-   * reading re-banked.
+   * app-server) has no use for it. It must never create a hold, never go
+   * backwards in time, and never notify subscribers: a subscriber writes
+   * observations to the ledger, and emitting here would bank a reading that
+   * came FROM the ledger a second time.
    */
-  seed?(observation: QuotaObservation): void;
+  seed?(observation: QuotaObservation): boolean;
   /** Optional lifecycle for monitors that own a process (Codex app-server). */
   start?(): Promise<void>;
   stop?(): void;

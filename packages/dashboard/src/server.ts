@@ -80,6 +80,30 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
     if (newest) monitor.seed(newest);
   }
 
+  // Follow the ledger for readings this process did not take.
+  //
+  // The engine is a separate process. Its students' rate-limit events feed the
+  // ENGINE's monitor and are banked in the ledger; this process never sees
+  // them, so the card sat 13 hours stale while the ledger held readings from
+  // minutes earlier (#37). Seeding only at boot fixed the first minute of that
+  // and nothing after it.
+  //
+  // Seed rather than observe: a subscriber above banks every observation, so
+  // observing a reading that came FROM the ledger would write it back and the
+  // two would feed each other.
+  const quotaFollow = setInterval(() => {
+    let changed = false;
+    for (const p of BUILTIN_PROVIDERS) {
+      if (!p.quota?.seed) continue;
+      const since = p.quota.snapshot().observation?.observedAt;
+      const rows = ledger.reader.quotaHistory(p.id, since ? new Date(since) : new Date(Date.now() - 24 * 60 * 60_000), 200);
+      const newest = rows[rows.length - 1];
+      if (newest && p.quota.seed(newest)) changed = true;
+    }
+    if (changed) broadcastQuota();
+  }, 10_000);
+  quotaFollow.unref?.();
+
   if (deps.startCodexQuota !== false) {
     const codexBin = resolveBin('codex');
     if (codexBin.found) {
@@ -260,6 +284,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
   });
 
   const stop = (): void => {
+    clearInterval(quotaFollow);
     editor.stop();
     engine.stop();
     void planner.stop();
