@@ -230,6 +230,11 @@ test('quotaHistory, events and outcomesFor honour their filters and ordering', (
   assert.deepEqual(r.quotaHistory('anthropic').map((q) => q.fiveHour!.utilization), [0.1, 0.5, 0.9]);
   assert.deepEqual(r.quotaHistory('anthropic', at(1)).map((q) => q.fiveHour!.utilization), [0.5, 0.9]);
   assert.deepEqual(r.quotaHistory('anthropic', undefined, 1).map((q) => q.ts), [at(0)]);
+  // The follower asks "what is the latest", which is the OPPOSITE end of the
+  // same ordering: a paged history would hand back the oldest unseen row.
+  assert.equal(r.latestQuota('anthropic')!.fiveHour!.utilization, 0.9);
+  assert.equal(r.latestQuota('openai')!.allowed, false);
+  assert.equal(r.latestQuota('nobody'), null, 'a provider with no reading is null, not an empty row');
   const [oq] = r.quotaHistory('openai');
   assert.equal(oq!.allowed, false);
   assert.equal(oq!.limitingWindow, 'sevenDay');

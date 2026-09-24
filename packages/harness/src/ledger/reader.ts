@@ -341,6 +341,20 @@ export class LedgerReader {
   }
 
   /** Observations for one provider, oldest first. */
+  /**
+   * The single newest stored reading for a provider, or null.
+   *
+   * `quotaHistory` walks forward from a timestamp, which is what pacing and
+   * capacity want. A follower that only needs "what is the latest" was asking
+   * for 200 rows to use one of them, and after a long gap would have walked
+   * forward 200 at a time instead of jumping straight to the newest.
+   */
+  latestQuota(provider: string): QuotaRecord | null {
+    const sql = `${QUOTA_SELECT} WHERE provider = :provider ORDER BY ts DESC, id DESC LIMIT 1`;
+    const row = this.stmt(sql).get({ provider }) as Row | undefined;
+    return row ? rowToQuota(row) : null;
+  }
+
   quotaHistory(provider: string, since?: TimeLike, limit?: number): QuotaRecord[] {
     const p: Record<string, Bindable> = { provider, limit: clampLimit(limit, 1000) };
     let sql = `${QUOTA_SELECT} WHERE provider = :provider`;

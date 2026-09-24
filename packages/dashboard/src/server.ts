@@ -95,13 +95,15 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
     let changed = false;
     for (const p of BUILTIN_PROVIDERS) {
       if (!p.quota?.seed) continue;
-      const since = p.quota.snapshot().observation?.observedAt;
-      const rows = ledger.reader.quotaHistory(p.id, since ? new Date(since) : new Date(Date.now() - 24 * 60 * 60_000), 200);
-      const newest = rows[rows.length - 1];
+      // The newest row, not a page of them: `seed` ignores anything that is not
+      // strictly newer, so one row is the whole question being asked.
+      const newest = ledger.reader.latestQuota(p.id);
       if (newest && p.quota.seed(newest)) changed = true;
     }
     if (changed) broadcastQuota();
-  }, 10_000);
+    // Thirty seconds, against a busiest observed rate of 12 readings a minute:
+    // fast enough that the card never looks stuck, slow enough to be invisible.
+  }, 30_000);
   quotaFollow.unref?.();
 
   if (deps.startCodexQuota !== false) {
