@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Harness, HarnessCapabilities, QuotaMonitor, QuotaSnapshot, QuotaObservation } from '@study-hall/harness/contract';
@@ -174,6 +174,33 @@ test('an overlapping tick is skipped and logged, never queued', async () => {
   assert.ok(events.includes('tick.overlap'));
   r.resolveRun(new Error('done'));
   await settle();
+  r.ledger.close();
+});
+
+test('starting again after a finished bounded run rearms it instead of parking on the first tick', async () => {
+  // The operator ran 14 merges, then pressed Start for another 14. The spent
+  // budget was still on disk with done === limit, the boot reused it because
+  // the limit and unit matched, and the very first tick held on
+  // bounded-run-spent. The board looked broken and nothing ran (#30).
+  const r = rig({ config: { boundedRun: { n: 2, unit: 'pr' } }, boards: { 'o/a': { issues: [issue(1), issue(2)], pulls: [] } } });
+  writeFileSync(join(r.stateDir, 'testrun.json'), JSON.stringify({ limit: 2, done: 2, unit: 'pr', since: '2026-01-01T00:00:00.000Z' }));
+  await r.engine.boot();
+  const armed = JSON.parse(readFileSync(join(r.stateDir, 'testrun.json'), 'utf8'));
+  assert.equal(armed.done, 0, 'a finished budget is history, not a standing refusal');
+  assert.equal(armed.limit, 2);
+  await r.engine.tick();
+  await settle();
+  assert.ok(r.runs.length > 0, 'work is dispatched rather than held on the first tick');
+  assert.equal(r.engine.running, true);
+  r.ledger.close();
+});
+
+test('an UNSPENT budget is resumed, so a crash mid-run does not restart the count', async () => {
+  const r = rig({ config: { boundedRun: { n: 5, unit: 'pr' } }, boards: { 'o/a': { issues: [issue(1)], pulls: [] } } });
+  writeFileSync(join(r.stateDir, 'testrun.json'), JSON.stringify({ limit: 5, done: 3, unit: 'pr', since: '2026-01-01T00:00:00.000Z' }));
+  await r.engine.boot();
+  const kept = JSON.parse(readFileSync(join(r.stateDir, 'testrun.json'), 'utf8'));
+  assert.equal(kept.done, 3, 'three of five are already spent and stay spent');
   r.ledger.close();
 });
 

@@ -275,7 +275,16 @@ export class Engine {
     const trFile = this.testRunPath();
     if (cfg.boundedRun.n > 0) {
       const existing = readTestRun(trFile);
-      if (!existing || existing.limit !== cfg.boundedRun.n || existing.unit !== cfg.boundedRun.unit) startTestRun(cfg.boundedRun.n, cfg.boundedRun.unit, trFile);
+      // Reuse an UNSPENT budget, so a crash at 7 of 14 resumes at 7 rather than
+      // starting the count over. Rearm a spent one: starting the engine is an
+      // explicit "go", and a finished budget is history, not a standing refusal.
+      // Without this, a completed run left 14/14 on disk and every later start
+      // parked on the first tick and looked broken (#30).
+      const spent = !!existing && existing.done >= existing.limit;
+      if (!existing || spent || existing.limit !== cfg.boundedRun.n || existing.unit !== cfg.boundedRun.unit) {
+        if (spent) this.log.info(`previous bounded run finished (${existing!.done}/${existing!.limit} ${existing!.unit}s) — starting a new one`);
+        startTestRun(cfg.boundedRun.n, cfg.boundedRun.unit, trFile);
+      }
       this.log.info(`bounded run: ${readTestRun(trFile)?.done ?? 0}/${cfg.boundedRun.n} ${cfg.boundedRun.unit}(s)`);
     } else {
       clearTestRun(trFile);
@@ -562,7 +571,11 @@ export class Engine {
             this.event({ level: 'info', event: `hold.${d.reason}`, repo: d.action?.repo ?? d.repo ?? null, item: d.action?.number ?? null, action: d.action?.kind ?? null, reason: d.detail ?? d.reason });
           }
           if (d.reason === 'bounded-run-spent' && this.inFlight.size === 0 && !this.stoppedReason) {
-            this.log.ok(`bounded run complete (${testRun?.done}/${testRun?.limit} ${testRun?.unit}s) — parking. Raise boundedRun.n or set unbounded to continue.`);
+            this.log.ok(`bounded run complete (${testRun?.done}/${testRun?.limit} ${testRun?.unit}s) — parking. Start again for another ${testRun?.limit}, or set boundedRun unbounded.`);
+            // The spent budget deliberately STAYS on disk: "14/14" is what the
+            // status line and the Boards header show about the run that just
+            // finished. The next start rearms it, which is where the "leaving a
+            // finished budget makes the next start park" hazard is handled.
             this.stop('bounded run complete');
           }
           break;
