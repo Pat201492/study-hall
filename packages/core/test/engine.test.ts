@@ -13,6 +13,7 @@ import { STATUS_SCHEMA } from '../src/engine/status.js';
 import { DEFAULT_ENGINE_CONFIG, DEFAULT_POOLS, type EngineConfig } from '../src/config.js';
 import { DEFAULT_BLACKOUT } from '../src/blackout.js';
 import type { RawIssue, OpenPull } from '../src/github.js';
+import { qualifyItemKey } from '../src/keys.js';
 
 // The engine driven over fixture boards with fake ports: no gh, no git, no CLI.
 
@@ -449,3 +450,106 @@ test('window pacing: a lane burning slowly enough to last is never rested, and n
   assert.equal(r.engine.snapshot().providers.anthropic.pace?.capped, false);
   r.ledger.close();
 });
+
+// ---- parole must terminate -------------------------------------------------
+// Observed live 2026-09-24: issue #216 was closed while quarantined, and the
+// engine logged "quarantine served — back on the board with a probe dispatch"
+// every 20 seconds for roughly 24 hours, spending the ticks that a 15-merge
+// bounded run had left.
+//
+// The cycle: reconcileWatchdog saw the closed item was off the board, deleted it
+// from `quarantined` and called forgetItem — which clears the watchdog's own
+// lifetime count, so the key was untracked from then on and that cleanup never
+// ran again. It never deleted the parole RECORD. paroleDue asked only paroleOf
+// who was due, and isDue() is a pure function of when the sentence started, so a
+// record with no hold beside it was due on every tick forever. Worse, releasing
+// it called probe(), which put the item back in the watchdog's tracking, so the
+// two paths handed it to each other at the tick interval.
+
+const QUARANTINE_START = 0;   // a sentence started at the epoch is long served
+const served = () => ({ at: QUARANTINE_START, paroles: 0 });
+const paroleCalls = (r: Rig, n: number) => r.calls.filter((c) => c === `removeLabel issue ${n} runner-error`);
+
+test('a parole record with no hold beside it is never released — the 24-hour loop', async () => {
+  const r = rig();
+  await r.engine.boot();
+  const mem = r.engine.repos.get('o/a')!.memory;
+  // Exactly the state reconcileWatchdog left behind for #216: the record survived,
+  // the hold did not, and the issue is not on the board.
+  mem.paroleOf.set(qualifyItemKey('o/a', 'issue', 216), served());
+  assert.equal(mem.quarantined.has(qualifyItemKey('o/a', 'issue', 216)), false);
+
+  for (let i = 0; i < 3; i++) { await r.engine.tick(); await settle(); }
+  assert.deepEqual(paroleCalls(r, 216), [], 'pre-fix this fired once per tick, forever');
+  r.ledger.close();
+});
+
+test('an item closed while quarantined is dropped, not paroled onto a board it left', async () => {
+  const r = rig();
+  await r.engine.boot();
+  const mem = r.engine.repos.get('o/a')!.memory;
+  const key = qualifyItemKey('o/a', 'issue', 216);
+  mem.quarantined.add(key);
+  mem.paroleOf.set(key, served());
+
+  await r.engine.tick();
+  await settle();
+  assert.equal(mem.quarantined.has(key), false, 'the hold is dropped');
+  assert.equal(mem.paroleOf.has(key), false, 'and so is the record — leaving it is the bug');
+  assert.deepEqual(paroleCalls(r, 216), [], 'a closed issue gets no probe dispatch');
+
+  for (let i = 0; i < 2; i++) { await r.engine.tick(); await settle(); }
+  assert.deepEqual(paroleCalls(r, 216), []);
+  r.ledger.close();
+});
+
+const condemned = (n: number) => issue(n, { labels: [{ name: 'runner-error' }] });
+
+test('an item still on the board is paroled exactly once, not once per tick', async () => {
+  const r = rig({ boards: { 'o/a': { issues: [issue(1), condemned(7)], pulls: [] } } });
+  await r.engine.boot();
+  const mem = r.engine.repos.get('o/a')!.memory;
+  const key = qualifyItemKey('o/a', 'issue', 7);
+  mem.quarantined.add(key);
+  mem.paroleOf.set(key, served());
+
+  for (let i = 0; i < 3; i++) { await r.engine.tick(); await settle(); }
+  assert.deepEqual(paroleCalls(r, 7), ['removeLabel issue 7 runner-error'], 'released once');
+  assert.equal(mem.quarantined.has(key), false, 'the hold ended the release');
+  // The record outlives the release on purpose: the next sentence escalates off it.
+  assert.deepEqual(mem.paroleOf.get(key), served());
+  r.ledger.close();
+});
+
+test('a sentence not yet served is left alone', async () => {
+  const r = rig({ boards: { 'o/a': { issues: [issue(1), condemned(7)], pulls: [] } } });
+  await r.engine.boot();
+  const mem = r.engine.repos.get('o/a')!.memory;
+  const key = qualifyItemKey('o/a', 'issue', 7);
+  mem.quarantined.add(key);
+  mem.paroleOf.set(key, { at: 1_700_000_000_000, paroles: 0 });   // starts now
+
+  await r.engine.tick();
+  await settle();
+  assert.deepEqual(paroleCalls(r, 7), []);
+  assert.equal(mem.quarantined.has(key), true, 'still serving');
+  r.ledger.close();
+});
+
+test("another repo's key is not purged by this repo's board", async () => {
+  const r = rig({ boards: { 'o/a': { issues: [issue(1)], pulls: [] }, 'o/b': { issues: [issue(1)], pulls: [] } } });
+  await r.engine.boot();
+  const mem = r.engine.repos.get('o/a')!.memory;
+  const foreign = qualifyItemKey('o/b', 'issue', 42);
+  mem.quarantined.add(foreign);
+  mem.paroleOf.set(foreign, served());
+
+  await r.engine.tick();
+  await settle();
+  // Neither paroled nor purged here: o/a's board cannot answer for o/b#42, and
+  // releasing it from this pass would clear the label on the wrong repo.
+  assert.equal(mem.quarantined.has(foreign), true);
+  assert.deepEqual(r.calls.filter((c) => c.endsWith('42 runner-error')), []);
+  r.ledger.close();
+});
+
