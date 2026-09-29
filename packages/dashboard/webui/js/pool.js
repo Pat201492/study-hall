@@ -12,7 +12,7 @@ function studentRow(s, fmt) {
     <td class="mono">${fmt.esc(s.id)}</td>
     <td><span class="pill ${s.provider}">${s.provider}</span> <span class="muted">${fmt.esc(s.harness)}</span></td>
     <td class="mono">${fmt.esc(s.model)}</td>
-    <td>${s.tier ?? '—'} / ${s.role ?? '—'}</td>
+    <td title="${fmt.esc(s.tier ?? '')}">${fmt.esc(s.tierLabel ?? s.tier ?? '—')} / ${s.role ?? '—'}</td>
     <td>${s.state === 'busy' ? '<span class="ok">busy</span>' : '<span class="muted">idle-warm</span>'} · ${warm}</td>
     <td>${item}${s.runId ? ` <a href="#/runs?id=${encodeURIComponent(s.runId)}" class="mono muted">${s.runId.slice(0, 8)}</a>` : ''}</td>
     <td class="mono">${fmt.tok(s.tokens)}</td>

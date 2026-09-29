@@ -59,6 +59,8 @@ export interface StudentStatus {
   harness: string;
   model: string;
   tier: Tier | null;
+  /** The provider's own name for the tier (`sol` on OpenAI); `tier` stays the ladder key. */
+  tierLabel?: string | null;
   role: Role | null;
   state: 'busy' | 'idle-warm';
   warm: boolean;

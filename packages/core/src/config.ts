@@ -9,7 +9,7 @@ import { DEFAULT_GENERATED_FILES, type GeneratedFileRule } from './generated.js'
 import { DEFAULT_AC_TIERING, type AcTieringConfig } from './difficultyRubric.js';
 import type { Role } from './types.js';
 import type { IssueAuditGate } from './issueAudit.js';
-import type { Tier } from './tiers.js';
+import { TIERS, type Tier } from './tiers.js';
 import { normalizeRepo } from './repo.js';
 import { hasCap, type RateLimit } from './rateBudget.js';
 import type { PaceOptions } from './windowPace.js';
@@ -23,7 +23,14 @@ import type { PaceOptions } from './windowPace.js';
 export type OptimizationMode = 'speed' | 'token';
 export type ReviewMode = 'auto' | 'human';
 
-export interface TierConfig { model: string; maxWarm: number }
+export interface TierConfig {
+  model: string;
+  maxWarm: number;
+  /** The provider's own name for this tier (`sol` for OpenAI's top tier). The
+   *  ladder keys (haiku/sonnet/opus) are Anthropic's names and only mean a rung;
+   *  shown to a person, or used in a student id, they misname every other vendor. */
+  label?: string;
+}
 
 export interface ProviderPoolConfig {
   /** Tiers this provider offers; a tier with maxWarm 0 is disabled (tierFallback routes around it). */
@@ -161,9 +168,9 @@ export const DEFAULT_POOLS: Record<string, ProviderPoolConfig> = {
     // Codex tiers map onto the same ladder so tierForDifficulty keeps working;
     // there is no objective equivalence between vendor tiers (declared in the arena).
     tiers: {
-      haiku: { model: 'gpt-5.6-luna', maxWarm: 1 },
-      sonnet: { model: 'gpt-5.6-terra', maxWarm: 2 },
-      opus: { model: 'gpt-5.6-sol', maxWarm: 1 },
+      haiku: { model: 'gpt-5.6-luna', maxWarm: 1, label: 'luna' },
+      sonnet: { model: 'gpt-5.6-terra', maxWarm: 2, label: 'terra' },
+      opus: { model: 'gpt-5.6-sol', maxWarm: 1, label: 'sol' },
     },
     maxConcurrent: 2,
     approval: 'never',
@@ -209,7 +216,9 @@ export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.
     const over = raw.pools?.[id];
     pools[id] = {
       ...base, ...(over ?? {}),
-      tiers: { ...base.tiers, ...(over?.tiers ?? {}) },
+      // Per tier, so overriding a tier's model keeps its default label and cap.
+      tiers: Object.fromEntries(TIERS.filter((t) => base.tiers[t] || over?.tiers?.[t])
+        .map((t) => [t, { ...base.tiers[t], ...(over?.tiers?.[t] ?? {}) } as TierConfig])),
       maxConcurrent: raw.provider?.concurrency?.[id] ?? over?.maxConcurrent ?? base.maxConcurrent,
     };
   }
@@ -239,6 +248,11 @@ export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.
 /** Generated-file rules in force: the repo's own list when non-empty, else the JS lockfile defaults. */
 export function generatedFilesFor(cfg: Pick<EngineConfig, 'generatedFiles'>): readonly GeneratedFileRule[] {
   return cfg.generatedFiles?.length ? cfg.generatedFiles : DEFAULT_GENERATED_FILES;
+}
+
+/** The provider's own name for a ladder rung: its configured label, else the rung key. */
+export function tierLabel(cfg: Pick<EngineConfig, 'pools'>, provider: string, tier: Tier): string {
+  return cfg.pools[provider]?.tiers[tier]?.label ?? tier;
 }
 
 /** The model a provider runs a tier on, honouring disabled tiers via tierFallback upstream. */
