@@ -174,6 +174,9 @@ export class Engine {
     onRetry: (attempt, waitMs, e) => this.log.warn(`git is locked by another writer (attempt ${attempt}, waiting ${waitMs} ms): ${e.message.split('\n')[0]}`),
   });
   private readonly restingReason = new Map<string, string>();
+  /** Keys already reported as past the lifetime cap. Such a key is due on every
+   *  tick from then on, so the report is per key, not per tick. */
+  private readonly paroleCapLogged = new Set<string>();
   readonly assignments = new AssignmentLog();
   private readonly reporter: Reporter;
   private readonly log: EngineLog;
@@ -624,15 +627,73 @@ export class Engine {
     if (changed) { this.persist.saveQuarantine(rt.slug, rt.memory.quarantined, rt.memory.paroleOf); this.persistCounters(rt.slug); }
   }
 
+  /** Quarantine state for items that have left the board, dropped WITHOUT a
+   *  parole: parole hands an item back to the board, and a closed issue has no
+   *  board to go back to.
+   *
+   *  reconcileWatchdog drops these too, but only for items the watchdog still
+   *  tracks, and it clears that tracking as it goes — so the second tick after a
+   *  close finds nothing left to reconcile. Deriving the set from the live board
+   *  instead depends on no bookkeeping another path can erase. */
+  /** Is this quarantine key one this repo's board can answer for? An unqualified
+   *  legacy key is this repo's by construction; one naming another repo is that
+   *  repo's, and releasing it here would parole it against the wrong board and
+   *  clear its label on the wrong GitHub repo. */
+  private ownsKey(rt: RepoRuntime, key: string): boolean {
+    const t = parseQualifiedKey(key);
+    return !!t && (!t.slug || t.slug === rt.slug);
+  }
+
+  private dropDepartedQuarantine(rt: RepoRuntime): void {
+    const onBoard = new Set<string>();
+    for (const i of rt.issues) onBoard.add(qualifyItemKey(rt.slug, 'issue', i.number));
+    for (const p of rt.pulls) onBoard.add(qualifyItemKey(rt.slug, 'pr', p.number));
+    let changed = false;
+    for (const key of [...rt.memory.quarantined]) {
+      const t = parseQualifiedKey(key);
+      if (!t || !this.ownsKey(rt, key)) continue;
+      if (onBoard.has(qualifyItemKey(rt.slug, t.kind, t.number))) continue;
+      rt.memory.quarantined.delete(key);
+      rt.memory.paroleOf.delete(key);
+      this.paroleCapLogged.delete(key);
+      changed = true;
+      this.log.ok(`${key}: closed or merged while quarantined — quarantine dropped, not paroled`);
+      this.event({ level: 'info', event: 'item.released', repo: rt.slug, item: t.number, reason: 'left the board' });
+    }
+    if (changed) { this.persist.saveQuarantine(rt.slug, rt.memory.quarantined, rt.memory.paroleOf); this.persistCounters(rt.slug); }
+  }
+
+  /**
+   * Release the quarantined items whose sentence is served.
+   *
+   * Observed live 2026-09-24: issue #216 was closed while quarantined, and the log
+   * carried "quarantine served — back on the board" every 20 seconds for a day,
+   * spending the ticks a 15-merge bounded run had left.
+   *
+   * isDue() is a pure function of when the sentence started, so a record that is
+   * due stays due for the life of the process. Releasing the item is what is meant
+   * to end that — but the due-query read paroleOf, and no path removed the record
+   * from paroleOf, so each tick re-released an item already released. Hence two
+   * guards: only keys still HELD are candidates (saveQuarantine already enforces
+   * paroleOf ⊆ quarantined on disk, so reading it the same way makes a release
+   * final), and an item off the board is dropped rather than paroled.
+   */
   private paroleDue(rt: RepoRuntime, now: number): void {
-    const { release, exhausted } = this.gov.paroleDue(rt.memory.paroleOf, now);
+    this.dropDepartedQuarantine(rt);
+    const held = [...rt.memory.paroleOf].filter(([key]) => rt.memory.quarantined.has(key) && this.ownsKey(rt, key));
+    const { release, exhausted } = this.gov.paroleDue(held, now);
     for (const key of exhausted) {
+      if (this.paroleCapLogged.has(key)) continue;
+      this.paroleCapLogged.add(key);
       this.log.err(`${key}: parole due but lifetime cap spent (${this.gov.watchdog.lifetimeFor(key)}) — staying parked; a human decides`);
     }
     if (!release.length) return;
     for (const key of release) {
       const t = parseQualifiedKey(key);
       const item = t ? qualifyItemKey(t.slug ?? rt.slug, t.kind, t.number) : key;
+      // The parole RECORD outlives the release on purpose: quarantineKey reads it
+      // to escalate the next sentence (reoffend). Dropping the hold is what ends
+      // the release, and the guard above reads the hold.
       rt.memory.quarantined.delete(key);
       this.gov.release(item, key);
       this.log.ok(`${key}: quarantine served — back on the board with a probe dispatch`);
@@ -679,7 +740,12 @@ export class Engine {
       if (onBoard.has(item)) continue;
       this.gov.watchdog.forgetItem(item);
       const rt = this.repoForKey(item);
-      if (rt && rt.memory.quarantined.delete(item)) this.persist.saveQuarantine(rt.slug, rt.memory.quarantined, rt.memory.paroleOf);
+      if (!rt) continue;
+      // Both, and never short-circuited: a hold left without its parole record is
+      // harmless, a record left without its hold is released on every tick.
+      const held = rt.memory.quarantined.delete(item);
+      const paroled = rt.memory.paroleOf.delete(item);
+      if (held || paroled) { this.paroleCapLogged.delete(item); this.persist.saveQuarantine(rt.slug, rt.memory.quarantined, rt.memory.paroleOf); }
     }
   }
 
