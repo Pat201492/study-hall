@@ -13,7 +13,7 @@ import { Persistence, type RepoMemory } from './persistence.js';
 import { runRole as realRunRole, realGit, realGitHub, RoleRunError, type GitPort, type GitHubPort, type RoleRunOutput, type RoleRunInput, type RunnerDeps, type DispatchDecision } from './roleRunner.js';
 import { Reporter, watchdogReport, wedgedReport, contestedReport, killReport, type ReportPort } from './reporting.js';
 import { STATUS_SCHEMA, type EngineStatus, type RepoStatus, type StudentStatus, type InFlightRef } from './status.js';
-import { boardProviderChoice, rateLimitFor, paceFor, type EngineConfig } from '../config.js';
+import { boardProviderChoice, rateLimitFor, paceFor, tierLabel, type EngineConfig } from '../config.js';
 import { billedTokens, RateTracker, type RateVerdict } from '../rateBudget.js';
 import { assessPace, paceSamples, DEFAULT_PACE, type PaceSample, type PaceVerdict } from '../windowPace.js';
 import { classify, isParked, parkedItems, deadlockedPulls, pullIssueNumber, type BoardAction } from '../classify.js';
@@ -164,6 +164,10 @@ export class Engine {
   private readonly lastDispatched = new Map<string, string>();
   private readonly capacityFailed = new Set<string>();
   private readonly protectors = new Map<string, Protector>();
+  // Keyed by studentKey(provider, id): each provider's Protector numbers its own
+  // workers, so a bare id is not unique across providers. Keyed by id alone, an
+  // OpenAI worker was handed the Anthropic worker's warm slot -- Claude harness,
+  // Claude session -- and a failover ran on the wrong vendor.
   private readonly slots = new Map<string, WarmSlot>();
   private readonly lastUsage = new Map<string, { tokens: number; cacheHitPct: number }>();
   /** Burn-rate governor, one per provider; only capped providers get a tracker. */
@@ -249,7 +253,7 @@ export class Engine {
     // Provider pools: one Protector per provider, sized from its pool.
     for (const [id, pool] of Object.entries(cfg.pools)) {
       const perTierMax = Math.max(1, ...Object.values(pool.tiers).map((t) => t?.maxWarm ?? 0));
-      this.protectors.set(id, new Protector({ perTierMax, totalCap: pool.maxConcurrent, maxConcurrent: pool.maxConcurrent, worktreeRoot: join(this.persist.stateDir, 'students', id) }));
+      this.protectors.set(id, new Protector({ perTierMax, totalCap: pool.maxConcurrent, maxConcurrent: pool.maxConcurrent, worktreeRoot: join(this.persist.stateDir, 'students', id), idLabel: (t) => tierLabel(cfg, id, t) }));
     }
 
     // Burn-rate governors, seeded from the ledger so a restart does not forget
@@ -842,7 +846,7 @@ export class Engine {
       this.log.info(`${d.action.kind} ${rt.slug}#${d.action.number} waiting — ${asg.waitReason}`);
       return false;
     }
-    const slot = this.slotFor(w, d.harness);
+    const slot = this.slotFor(d.provider, w, d.harness);
     const abort = new AbortController();
     const entry: InFlightEntry = { decision: d, runId, workerId: w.id, startedAt: new Date(this.now()).toISOString(), usage: null, abort, promise: Promise.resolve() };
     this.inFlight.set(d.key, entry);
@@ -890,11 +894,12 @@ export class Engine {
     return true;
   }
 
-  private slotFor(w: Worker, harnessId: string): WarmSlot {
-    let slot = this.slots.get(w.id);
+  private slotFor(provider: string, w: Worker, harnessId: string): WarmSlot {
+    const key = studentKey(provider, w.id);
+    let slot = this.slots.get(key);
     if (!slot) {
       slot = new WarmSlot({ harness: this.opts.ports.harnesses.get(harnessId), log: (m) => this.log.warn(m) });
-      this.slots.set(w.id, slot);
+      this.slots.set(key, slot);
       w.session = slot;
     }
     return slot;
@@ -973,7 +978,7 @@ export class Engine {
   private noteUsage(d: DispatchDecision, run: RunRecord): void {
     const e = [...this.inFlight.values()].find((x) => x.decision.key === d.key);
     const u = { inputTokens: run.inputTokens, outputTokens: run.outputTokens, cacheReadInputTokens: run.cacheReadInputTokens, cacheCreationInputTokens: run.cacheCreationInputTokens };
-    this.lastUsage.set(e?.workerId ?? d.key, { tokens: tokensProcessed(u), cacheHitPct: cacheHitPct(u) });
+    this.lastUsage.set(e ? studentKey(d.provider, e.workerId) : d.key, { tokens: tokensProcessed(u), cacheHitPct: cacheHitPct(u) });
     // The run's spend moves from the live bucket to a committed sample, dated
     // when it landed, so it ages out of the window on its own.
     this.rate.get(d.provider)?.commit(run.runId, {
@@ -990,7 +995,7 @@ export class Engine {
   }
 
   private refreshTokens(): void {
-    for (const e of this.inFlight.values()) if (e.usage) this.lastUsage.set(e.workerId, { tokens: tokensProcessed(e.usage), cacheHitPct: cacheHitPct(e.usage) });
+    for (const e of this.inFlight.values()) if (e.usage) this.lastUsage.set(studentKey(e.decision.provider, e.workerId), { tokens: tokensProcessed(e.usage), cacheHitPct: cacheHitPct(e.usage) });
   }
 
   // ---- lifecycle ------------------------------------------------------------------------------
@@ -1056,15 +1061,16 @@ export class Engine {
     }
     const students: StudentStatus[] = [];
     const busyWorkers = new Map<string, InFlightEntry>();
-    for (const e of this.inFlight.values()) busyWorkers.set(e.workerId, e);
+    for (const e of this.inFlight.values()) busyWorkers.set(studentKey(e.decision.provider, e.workerId), e);
     for (const [provider, protector] of this.protectors) {
       for (const w of protector.pool) {
-        const e = busyWorkers.get(w.id);
-        const slot = this.slots.get(w.id);
-        const last = this.lastUsage.get(w.id);
+        const key = studentKey(provider, w.id);
+        const e = busyWorkers.get(key);
+        const slot = this.slots.get(key);
+        const last = this.lastUsage.get(key);
         students.push({
           id: w.id, provider, harness: e?.decision.harness ?? slot?.harness.id ?? this.opts.harnessFor[provider] ?? '', model: e?.decision.model ?? cfg.pools[provider]?.tiers[w.tier]?.model ?? '',
-          tier: w.tier, role: e?.decision.role ?? w.role, state: e ? 'busy' : 'idle-warm', warm: slot?.isWarm ?? false, baseSessionId: slot?.baseId ?? null,
+          tier: w.tier, tierLabel: tierLabel(cfg, provider, w.tier), role: e?.decision.role ?? w.role, state: e ? 'busy' : 'idle-warm', warm: slot?.isWarm ?? false, baseSessionId: slot?.baseId ?? null,
           repo: e?.decision.action.repo ?? w.repo ?? null, item: e?.decision.action.number ?? null, runId: e?.runId ?? null, startedAt: e?.startedAt ?? null,
           tokens: e?.usage ? tokensProcessed(e.usage) : last?.tokens ?? 0, cacheHitPct: e?.usage ? cacheHitPct(e.usage) : last?.cacheHitPct ?? 0,
         });
@@ -1098,4 +1104,9 @@ export class Engine {
   writeStatus(): void {
     try { this.persist.writeStatus(this.snapshot()); } catch (e) { this.log.err(`status write failed: ${(e as Error).message}`); }
   }
+}
+
+/** A worker's identity across the whole engine: its id is only unique within its provider's pool. */
+export function studentKey(provider: string, workerId: string): string {
+  return `${provider}:${workerId}`;
 }

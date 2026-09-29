@@ -294,6 +294,62 @@ test('failure routing: a capacity failure pauses the anthropic lane and the next
   r.ledger.close();
 });
 
+test('a failover student gets its own provider\'s warm slot and name, never the other vendor\'s', async () => {
+  // Both providers number their workers from 1, so the Anthropic and OpenAI top
+  // tiers both minted "opus-1". Slots were keyed by that bare id: the Codex run
+  // was handed the Claude worker's warm slot and ran on the Claude harness.
+  const r = rig({ runner: 'fail-capacity' });
+  await r.engine.boot();
+  await r.engine.tick();
+  await settle();
+  await r.engine.tick();
+  await settle();
+  const [claude, codex] = r.runs;
+  assert.equal(claude.decision.provider, 'anthropic');
+  assert.equal(codex.decision.provider, 'openai');
+  assert.notEqual(codex.worker.slot, claude.worker.slot, 'a separate warm slot per provider');
+  assert.equal(codex.worker.slot.harness.id, 'codex');
+  assert.equal(claude.worker.slot.harness.id, 'claude-code');
+  assert.doesNotMatch(codex.worker.id, /haiku|sonnet|opus/, 'an OpenAI student is not named after a Claude tier');
+  const students = r.engine.snapshot().students;
+  const openai = students.filter((s) => s.provider === 'openai');
+  assert.ok(openai.length > 0);
+  for (const s of openai) {
+    assert.equal(s.harness, 'codex');
+    assert.ok(['luna', 'terra', 'sol'].includes(s.tierLabel ?? ''), `openai tierLabel ${s.tierLabel}`);
+  }
+  for (const s of students.filter((x) => x.provider === 'anthropic')) assert.equal(s.tierLabel, s.tier);
+  r.ledger.close();
+});
+
+test('a failover student gets its own provider\'s warm slot and name, never the other vendor\'s', async () => {
+  // Both providers number their workers from 1, so the Anthropic and OpenAI top
+  // tiers both minted "opus-1". Slots were keyed by that bare id: the Codex run
+  // was handed the Claude worker's warm slot and ran on the Claude harness.
+  const r = rig({ runner: 'fail-capacity' });
+  await r.engine.boot();
+  await r.engine.tick();
+  await settle();
+  await r.engine.tick();
+  await settle();
+  const [claude, codex] = r.runs;
+  assert.equal(claude.decision.provider, 'anthropic');
+  assert.equal(codex.decision.provider, 'openai');
+  assert.notEqual(codex.worker.slot, claude.worker.slot, 'a separate warm slot per provider');
+  assert.equal(codex.worker.slot.harness.id, 'codex');
+  assert.equal(claude.worker.slot.harness.id, 'claude-code');
+  assert.doesNotMatch(codex.worker.id, /haiku|sonnet|opus/, 'an OpenAI student is not named after a Claude tier');
+  const students = r.engine.snapshot().students;
+  const openai = students.filter((s) => s.provider === 'openai');
+  assert.ok(openai.length > 0);
+  for (const s of openai) {
+    assert.equal(s.harness, 'codex');
+    assert.ok(['luna', 'terra', 'sol'].includes(s.tierLabel ?? ''), `openai tierLabel ${s.tierLabel}`);
+  }
+  for (const s of students.filter((x) => x.provider === 'anthropic')) assert.equal(s.tierLabel, s.tier);
+  r.ledger.close();
+});
+
 test('an auth failure at preflight halts that lane; the other provider keeps dispatching', async () => {
   const r = rig({ preflightOk: { anthropic: false } });
   await r.engine.boot();

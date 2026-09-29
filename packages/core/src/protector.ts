@@ -91,6 +91,8 @@ export interface ProtectorConfig {
   maxConcurrent: number;
   /** Parent dir each student's dedicated worktree lives under. */
   worktreeRoot: string;
+  /** Name used in a student's id for a tier (`sol-1`, not `opus-1`, on OpenAI). Defaults to the tier key. */
+  idLabel?: (tier: Tier) => string;
 }
 
 export const DEFAULT_PROTECTOR_CONFIG: ProtectorConfig = {
@@ -165,7 +167,7 @@ export class Protector {
 
   private spawn(tier: Tier, role: Role): Worker {
     this.idSeq += 1;
-    const id = `${tier}-${this.idSeq}`;
+    const id = `${this.cfg.idLabel?.(tier) ?? tier}-${this.idSeq}`;
     const w: Worker = {
       id,
       tier,
