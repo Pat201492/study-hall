@@ -85,8 +85,9 @@ export function readTestRun(file: string = testRunPath()): TestRunState | null {
 /**
  * Record one completed unit and report whether the budget is now spent.
  *
- * Persisted on every increment rather than held in memory, so a crash mid-run
- * resumes with the count it had reached instead of starting the budget over.
+ * Persisted on every increment rather than held in memory, so the dashboard
+ * (a separate process) can read live progress. The engine rearms the budget at
+ * 0/N on every start, so the count never carries from one run into the next.
  */
 export function noteCompletion(unit: TestRunUnit, file: string = testRunPath()): { spent: boolean; state: TestRunState | null } {
   const state = readTestRun(file);

@@ -280,21 +280,18 @@ export class Engine {
       await this.preflight(id);
     }
 
-    // Bounded by default. The budget file survives a crash so the count resumes.
+    // Bounded by default, and every start is a NEW run: the budget is rearmed at
+    // 0/N on each boot. Starting the engine is an explicit "go for N more".
+    // Resuming a partial count looked like a cap that never reset: the dashboard's
+    // Stop tree-kills the engine, so a run stopped at 3/5 never reached stop(),
+    // and the next start ran only 2 (a spent 14/14 was the same bug, #30). The
+    // engine cannot tell a crash from that kill, so it no longer tries to resume.
     const trFile = this.testRunPath();
     if (cfg.boundedRun.n > 0) {
       const existing = readTestRun(trFile);
-      // Reuse an UNSPENT budget, so a crash at 7 of 14 resumes at 7 rather than
-      // starting the count over. Rearm a spent one: starting the engine is an
-      // explicit "go", and a finished budget is history, not a standing refusal.
-      // Without this, a completed run left 14/14 on disk and every later start
-      // parked on the first tick and looked broken (#30).
-      const spent = !!existing && existing.done >= existing.limit;
-      if (!existing || spent || existing.limit !== cfg.boundedRun.n || existing.unit !== cfg.boundedRun.unit) {
-        if (spent) this.log.info(`previous bounded run finished (${existing!.done}/${existing!.limit} ${existing!.unit}s) — starting a new one`);
-        startTestRun(cfg.boundedRun.n, cfg.boundedRun.unit, trFile);
-      }
-      this.log.info(`bounded run: ${readTestRun(trFile)?.done ?? 0}/${cfg.boundedRun.n} ${cfg.boundedRun.unit}(s)`);
+      if (existing) this.log.info(`previous bounded run ended at ${existing.done}/${existing.limit} ${existing.unit}s — starting a new one`);
+      startTestRun(cfg.boundedRun.n, cfg.boundedRun.unit, trFile);
+      this.log.info(`bounded run: 0/${cfg.boundedRun.n} ${cfg.boundedRun.unit}(s)`);
     } else {
       clearTestRun(trFile);
       this.log.warn('UNBOUNDED run — every expensive incident was one.');
