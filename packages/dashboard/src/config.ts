@@ -55,7 +55,7 @@ export const DEFAULT_CONFIG: StudyHallConfig = {
   },
   models: {
     anthropic: { haiku: 'claude-haiku-4-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-4-8', default: 'claude-sonnet-5' },
-    openai: { default: 'gpt-5.6-terra' },
+    openai: { haiku: 'gpt-5.6-luna', sonnet: 'gpt-5.6-terra', opus: 'gpt-5.6-sol', default: 'gpt-5.6-terra' },
     local: {},
   },
   v1UsagePath: join(homedir(), '.claude-study-room', 'usage.jsonl'),

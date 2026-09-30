@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_POOLS, loadEngineConfig, tierLabel } from '../src/config.js';
 import { Protector } from '../src/protector.js';
+import { issueToTask } from '../src/github.js';
 
 // The ladder keys (haiku/sonnet/opus) are Anthropic's names for three rungs.
 // Another vendor's students must carry that vendor's own names.
@@ -33,4 +34,15 @@ test('a Protector names its students with the label it is given', () => {
   assert.equal(a.worker?.id, 'sol-1');
   const plain = new Protector({ perTierMax: 2, totalCap: 4, maxConcurrent: 2, worktreeRoot: 'w' });
   assert.equal(plain.assign([{ id: 't1', tier: 'opus', role: 'implement' }])[0].worker?.id, 'opus-1');
+});
+
+test('a model: pin label accepts either provider name for a rung', () => {
+  const pinned = (label: string) => issueToTask(
+    { number: 1, title: 't', body: '', labels: [{ name: label }] } as Parameters<typeof issueToTask>[0],
+    'balanced' as Parameters<typeof issueToTask>[1], () => 'simple').model;
+  assert.equal(pinned('model:sol'), 'opus');
+  assert.equal(pinned('model:terra'), 'sonnet');
+  assert.equal(pinned('model:luna'), 'haiku');
+  assert.equal(pinned('model:opus'), 'opus');
+  assert.notEqual(pinned('model:gpt'), undefined, 'an unknown name is not a pin; difficulty decides');
 });

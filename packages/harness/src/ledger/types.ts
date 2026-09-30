@@ -38,7 +38,8 @@ export interface RunRecord {
   /** Issue or PR number the run was working. */
   item: number;
   role: string;
-  /** Anthropic-shaped tier for legacy attribution; null on other providers. */
+  /** The provider's own tier name (`opus` on Anthropic, `sol` on OpenAI), never
+   *  the shared ladder key on a non-Anthropic run. Null for side runs. */
   tier?: string | null;
   provider: string;
   harness: string;

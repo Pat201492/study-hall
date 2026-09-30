@@ -6,7 +6,7 @@ import { effectiveTier } from '../tierFallback.js';
 import { collidingPaths, isContended } from '../ownership.js';
 import { selectProvider, type ProviderChoice, type SelectReason } from '../providerSelect.js';
 import { qualifyActionKey, qualifyItemKey } from '../keys.js';
-import { modelFor, type EngineConfig, type ProviderPoolConfig } from '../config.js';
+import { modelFor, tierLabel, type EngineConfig, type ProviderPoolConfig } from '../config.js';
 import type { Task } from '../taskmap.js';
 import type { Role } from '../types.js';
 import { TIERS, type Tier } from '../tiers.js';
@@ -100,7 +100,11 @@ export type Decision =
       /** "owner/name:target-n" — the watchdog's item key. */
       item: string;
       role: Role;
+      /** The shared ladder rung (routing, difficulty, failover). Internal only. */
       tier: Tier;
+      /** The provider's own name for that rung (`sol` on OpenAI, `opus` on
+       *  Anthropic). Everything a person reads or a record keeps uses this. */
+      tierLabel?: string;
       provider: string;
       harness: string;
       model: string;
@@ -353,7 +357,7 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
     const tier = tierFor(action, view, pool);
     const model = modelFor({ pools: cfg.pools } as EngineConfig, provider, tier);
     if (!model) {
-      decisions.push({ kind: 'hold', scope: 'action', reason: 'no-model', action, detail: `${provider} has no enabled tier for ${tier}` });
+      decisions.push({ kind: 'hold', scope: 'action', reason: 'no-model', action, detail: `${provider} has no enabled ${tierLabel({ pools: cfg.pools }, provider, tier)} tier` });
       continue;
     }
     const harness = cfg.harnessFor[provider];
@@ -369,7 +373,7 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
     const redispatch = (state.attempts?.[item] ?? 0) > 0;
 
     decisions.push({
-      kind: 'dispatch', action, key, item, role, tier, provider, harness, model,
+      kind: 'dispatch', action, key, item, role, tier, tierLabel: tierLabel({ pools: cfg.pools }, provider, tier), provider, harness, model,
       effort: effortFor(tier, cfg.optimizationMode), files, redispatch,
       reason: `${action.reason} [${describeSelect(sel.reason)}]`,
     });

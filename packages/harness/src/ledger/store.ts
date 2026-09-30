@@ -92,7 +92,17 @@ export function openLedger(dir: string, opts: LedgerOptions = {}): Ledger {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA busy_timeout = 5000');
   migrate(db);
+  relabelOpenAiTiers(db);
   return new SqliteLedger(root, dbPath, db, opts);
+}
+
+/** OpenAI rows written before tiers carried the provider's own name stored the
+ *  Anthropic ladder key (`opus` for gpt-5.6-sol). Rename them to OpenAI's rungs.
+ *  Idempotent and cheap: once renamed, the WHERE matches nothing. */
+export function relabelOpenAiTiers(db: DatabaseSync): void {
+  const set = "tier = CASE tier WHEN 'haiku' THEN 'luna' WHEN 'sonnet' THEN 'terra' WHEN 'opus' THEN 'sol' END";
+  const where = "provider = 'openai' AND tier IN ('haiku', 'sonnet', 'opus')";
+  for (const table of ['runs', 'assignments']) db.exec(`UPDATE ${table} SET ${set} WHERE ${where}`);
 }
 
 // ---- Record building --------------------------------------------------------

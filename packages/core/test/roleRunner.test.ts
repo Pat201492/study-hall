@@ -168,6 +168,17 @@ test('the second task on a worker forks off the ADOPTED id — adopt-only harnes
 
 // ---- ledger row -----------------------------------------------------------------
 
+test('an OpenAI run records the OpenAI tier name (sol), not the Anthropic ladder key', async () => {
+  const { slot } = slotFor(fakeHarness('fake-codex', CODEX_LIKE, 'openai'), [{ sessionId: 'thr_abc' }]);
+  const { git } = fakeGit();
+  const { hub } = fakeGh();
+  const out = await run('implement', 1, slot, git, hub, {
+    decision: decision('implement', 1, { provider: 'openai', harness: 'fake-codex', model: 'gpt-5.6-sol', tier: 'opus', tierLabel: 'sol' }),
+  });
+  assert.equal(out.run?.tier, 'sol');
+  assert.equal(out.run?.model, 'gpt-5.6-sol');
+});
+
 test('the ledger row carries every field the arena needs', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sh-transcripts-'));
   const { slot } = slotFor(fakeHarness('fake-claude', CLAUDE_LIKE), [{ transcript: ['{"type":"system"}', '{"type":"result"}'] }]);
