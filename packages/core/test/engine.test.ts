@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Harness, HarnessCapabilities, QuotaMonitor, QuotaSnapshot, QuotaObservation } from '@study-hall/harness/contract';
 import { openLedger, type Ledger } from '@study-hall/harness/ledger/index';
-import { Engine, type EnginePorts, type EngineGitHub } from '../src/engine/engine.js';
+import { Engine, isNetworkError, type EnginePorts, type EngineGitHub } from '../src/engine/engine.js';
 import { Governance } from '../src/engine/governance.js';
 import { Persistence } from '../src/engine/persistence.js';
 import { RoleRunError, type RoleRunInput, type RoleRunOutput } from '../src/engine/roleRunner.js';
@@ -374,6 +374,42 @@ test('a board whose fetch fails keeps the other board dispatching; every board f
   await r.engine.tick();
   assert.match(r.engine.snapshot().capacity?.reason ?? '', /GitHub rate limit/);
   r.ledger.close();
+});
+
+test('GitHub unreachable holds dispatch with backoff and never trips the watchdog kill; a real error still does', async () => {
+  // Live 2026-09-29 20:08 and 2026-10-01 01:05: "error connecting to
+  // api.github.com" for five heartbeats counted as engine errors, the watchdog
+  // killed the engine, and it stayed down until a human restarted it.
+  const r = rig();
+  await r.engine.boot();
+  const gh = r.engine['opts'].ports.github;
+  const orig = gh.fetchIssues;
+  gh.fetchIssues = async () => { throw new Error('error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com'); };
+  for (let i = 0; i < 8; i++) await r.engine.tick();
+  assert.equal(r.engine.running, true, 'eight unreachable ticks do not stop the engine');
+  assert.match(r.engine.snapshot().capacity?.reason ?? '', /GitHub unreachable/);
+  assert.equal(r.runs.length, 0, 'nothing dispatched while GitHub is unreachable');
+  const events = r.ledger.reader.events({ limit: 100 });
+  const net = events.filter((e) => e.event === 'network.github');
+  assert.equal(net.length, 8);
+  assert.ok(!events.some((e) => e.event === 'engine.kill'));
+  const untils = net.map((e) => (e.data as { until: number }).until).sort((a, b) => a - b);
+  assert.ok(untils[1] - untils[0] > 0, 'the hold grows with the outage');
+  assert.ok(untils[untils.length - 1] - 1_700_000_000_000 <= 15 * 60_000, 'the hold is capped at 15 minutes');
+
+  // A non-network failure on every board is still an engine error and still kills.
+  gh.fetchIssues = async () => { throw new Error('gh: unexpected JSON in response'); };
+  for (let i = 0; i < 5; i++) await r.engine.tick();
+  assert.equal(r.engine.running, false, 'five real errors in a row still trip the kill');
+  gh.fetchIssues = orig;
+  r.ledger.close();
+});
+
+test('isNetworkError recognises transport failures, not GitHub answers', () => {
+  for (const m of ['error connecting to api.github.com', 'getaddrinfo ENOTFOUND api.github.com', 'read ECONNRESET', 'HTTP 502: Bad Gateway', 'socket hang up'])
+    assert.equal(isNetworkError(m), true, m);
+  for (const m of ['HTTP 404: Not Found', 'gh: unexpected JSON', 'HTTP 422: Validation Failed', 'API rate limit exceeded'])
+    assert.equal(isNetworkError(m), false, m);
 });
 
 test('stop aborts in-flight students and kills every harness', async () => {
