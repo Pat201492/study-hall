@@ -94,9 +94,11 @@ test('failover: Claude exhausted routes to Codex; available again routes back', 
   assert.equal(d[0].provider, 'openai');
   assert.equal(d[0].harness, 'codex');
   assert.equal(d[0].model, DEFAULT_POOLS.openai.tiers.opus!.model);
+  assert.equal(d[0].tierLabel, 'sol', 'an OpenAI dispatch carries the OpenAI name for the rung');
 
   const back = decide(boards, state(), cfg);
   assert.equal(dispatches(back.decisions)[0].provider, 'anthropic');
+  assert.equal(dispatches(back.decisions)[0].tierLabel, 'opus');
 });
 
 test('a provider in unknown yields a probe and no dispatch commits to it', () => {

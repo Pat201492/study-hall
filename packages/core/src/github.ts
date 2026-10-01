@@ -198,12 +198,17 @@ export function difficultyFromLabels(labels: { name: string }[]): Difficulty | u
   return undefined;
 }
 
-// A `model:opus|sonnet|haiku` label pins the tier (mirrors the runner's pin
-// convention) — the Protector's retiering leaves pinned tasks alone.
+// A `model:<tier>` label pins the tier (mirrors the runner's pin convention) —
+// the Protector's retiering leaves pinned tasks alone. Either provider's name for
+// a rung works: `model:sol` pins the same rung as `model:opus`.
+const PIN_RUNG: Record<string, 'haiku' | 'sonnet' | 'opus'> = {
+  haiku: 'haiku', sonnet: 'sonnet', opus: 'opus',
+  luna: 'haiku', terra: 'sonnet', sol: 'opus',
+};
 function pinFromLabels(labels: { name: string }[]): 'haiku' | 'sonnet' | 'opus' | undefined {
   for (const { name } of labels) {
-    const m = name.toLowerCase().match(/^model:(haiku|sonnet|opus)$/);
-    if (m) return m[1] as 'haiku' | 'sonnet' | 'opus';
+    const m = name.toLowerCase().match(/^model:([a-z]+)$/);
+    if (m && PIN_RUNG[m[1]]) return PIN_RUNG[m[1]];
   }
   return undefined;
 }

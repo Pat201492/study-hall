@@ -211,7 +211,7 @@ export async function runRole(input: RoleRunInput, deps: RunnerDeps = {}): Promi
   const seed = {
     runId: input.runId, repo: repo.slug, item: a.number, role: decision.role,
     provider: decision.provider, harness: harness.id, model: decision.model, effort: decision.effort,
-    tier: decision.tier, meter: 'unknown' as const,
+    tier: decision.tierLabel ?? decision.tier, meter: 'unknown' as const,
     approval: input.pool.approval, sandbox: input.pool.sandbox,
     toolAllowlist: input.pool.tools?.length ? [...input.pool.tools] : null,
     toolAllowlistEnforced: input.pool.tools?.length ? harness.capabilities.toolAllowlist : null,

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { QuotaObservation, Usage } from '../src/contract.js';
 import { PRICING_TABLE_VERSION } from '../src/pricing.js';
 import {
-  LEDGER_SCHEMA_VERSION, MIRROR_FILES, openLedger, toRunRecord, v1RowToRunRecord,
+  LEDGER_SCHEMA_VERSION, MIRROR_FILES, openLedger, relabelOpenAiTiers, toRunRecord, v1RowToRunRecord,
   type AssignmentRecord, type EventRecord, type OutcomeRecord, type RunRecord,
 } from '../src/ledger/index.js';
 
@@ -331,4 +331,22 @@ test('v1RowToRunRecord keeps a missing-fidelity row unpriced', () => {
   assert.equal(rec.fidelity, 'missing');
   assert.equal(rec.costBasis, 'none');
   assert.equal(v1RowToRunRecord({ ts: 'x' }), undefined);
+});
+
+test('opening the ledger renames old OpenAI tier rows to the OpenAI names; Anthropic rows are untouched', () => {
+  const dir = tmp();
+  const ledger = openLedger(dir);
+  ledger.recordRun({ ...fullRun(), runId: 'oa', provider: 'openai', harness: 'codex', model: 'gpt-5.6-sol', tier: 'opus' });
+  ledger.recordRun({ ...fullRun(), runId: 'an', provider: 'anthropic', tier: 'opus' });
+  ledger.recordAssignment({ ...ASSIGNMENT, provider: 'openai', tier: 'sonnet' });
+  ledger.close();
+
+  const again = openLedger(dir);
+  const tiers = Object.fromEntries(again.reader.attribution().map((r) => [r.provider, r.tier]));
+  assert.equal(tiers.openai, 'sol');
+  assert.equal(tiers.anthropic, 'opus');
+  assert.equal(again.reader.assignments().find((a) => a.provider === 'openai')?.tier, 'terra');
+  relabelOpenAiTiers((again as unknown as { db: Parameters<typeof relabelOpenAiTiers>[0] }).db);  // idempotent
+  assert.equal(again.reader.attribution().find((r) => r.provider === 'openai')?.tier, 'sol');
+  again.close();
 });

@@ -854,7 +854,7 @@ export class Engine {
       ...(asg.kind === 'rerole' && w ? { fromRole: before.get(w.id) ?? w.role } : {}), ...(asg.waitReason ? { waitReason: asg.waitReason } : {}),
     });
     this.ledger.recordAssignment({
-      ts: new Date(this.now()).toISOString(), repo: rt.slug, kind: asg.kind === 'cross-repo' ? 'crossRepo' : asg.kind, tier: d.tier, role: d.role,
+      ts: new Date(this.now()).toISOString(), repo: rt.slug, kind: asg.kind === 'cross-repo' ? 'crossRepo' : asg.kind, tier: d.tierLabel ?? d.tier, role: d.role,
       provider: d.provider, workerId: w?.id ?? null, fromRole: asg.kind === 'rerole' && w ? before.get(w.id) ?? null : null,
       waitReason: asg.waitReason ?? null, item: d.action.number, runId: w ? runId : null,
     });
@@ -871,7 +871,7 @@ export class Engine {
     const counters = this.gov.recordDispatch(d.item);
     this.persistCounters(rt.slug);
     this.log.info(`↻ ${d.action.kind} ${rt.slug}#${d.action.number} → ${w.id} (${asg.kind}, ${d.provider}/${d.model}) ${d.reason}`);
-    this.event({ level: 'info', event: 'dispatch', repo: rt.slug, item: d.action.number, runId, action: d.action.kind, reason: d.reason, data: { role: d.role, provider: d.provider, harness: d.harness, model: d.model, tier: d.tier, worker: w.id, assignment: asg.kind, attempts: counters.attempts } });
+    this.event({ level: 'info', event: 'dispatch', repo: rt.slug, item: d.action.number, runId, action: d.action.kind, reason: d.reason, data: { role: d.role, provider: d.provider, harness: d.harness, model: d.model, tier: d.tierLabel ?? d.tier, rung: d.tier, worker: w.id, assignment: asg.kind, attempts: counters.attempts } });
     this.onChange();
 
     const cfg = this.cfg;
