@@ -132,7 +132,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
       harnesses: BUILTIN_HARNESSES.map((h) => ({ id: h.id, provider: h.provider, capabilities: h.capabilities })),
       provider: { ...c.provider, effective: Object.fromEntries(SURFACES.map((s) => [s, providerFor(c, s)])) },
       repos: c.repos,
-      engine: (() => { const v = engine.view(); const s = v.status; return { running: v.running, live: v.live, tick: s?.tick ?? 0, stopped: s?.stopped ?? false, updatedAt: s?.updatedAt ?? null, boundedRun: s?.boundedRun ?? null, lastTick: s?.lastTick ?? null, drainRequested: v.drainRequested, students: v.live ? s!.students.length : 0 }; })(),
+      engine: (() => { const v = engine.view(); const s = v.status; return { running: v.running, live: v.live, tick: s?.tick ?? 0, stopped: s?.stopped ?? false, updatedAt: s?.updatedAt ?? null, boundedRun: v.boundedRun, lastTick: s?.lastTick ?? null, drainRequested: v.drainRequested, students: v.live ? s!.students.length : 0 }; })(),
       ledger: { dir: ledger.dir },
     };
   });

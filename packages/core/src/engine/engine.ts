@@ -224,6 +224,25 @@ export class Engine {
       throw new Error('boundedRun.n is 0 and `unbounded: true` is not set — an unbounded run must be explicit');
     }
 
+    // Bounded by default, and every start is a NEW run: the budget is rearmed at
+    // 0/N on each boot, FIRST, before cloning and preflight (which take ~10s and
+    // can fail), so a start always resets the cap even if boot goes no further.
+    // Starting the engine is an explicit "go for N more".
+    // Resuming a partial count looked like a cap that never reset: the dashboard's
+    // Stop tree-kills the engine, so a run stopped at 3/5 never reached stop(),
+    // and the next start ran only 2 (a spent 14/14 was the same bug, #30). The
+    // engine cannot tell a crash from that kill, so it no longer tries to resume.
+    const trFile = this.testRunPath();
+    if (cfg.boundedRun.n > 0) {
+      const existing = readTestRun(trFile);
+      if (existing && existing.done > 0) this.log.info(`previous bounded run ended at ${existing.done}/${existing.limit} ${existing.unit}s — starting a new one`);
+      startTestRun(cfg.boundedRun.n, cfg.boundedRun.unit, trFile);
+      this.log.info(`bounded run: 0/${cfg.boundedRun.n} ${cfg.boundedRun.unit}(s)`);
+    } else {
+      clearTestRun(trFile);
+      this.log.warn('UNBOUNDED run — every expensive incident was one.');
+    }
+
     for (const r of cfg.repos) {
       const slug = r.repo;
       const dir = join(this.persist.dirFor(slug), 'repo');
@@ -278,23 +297,6 @@ export class Engine {
       quota?.subscribe((s) => { if (s.observation) this.ledger.recordQuota(s.observation); });
       await quota?.start?.().catch((e) => this.log.warn(`${id}: quota monitor did not start: ${(e as Error).message}`));
       await this.preflight(id);
-    }
-
-    // Bounded by default, and every start is a NEW run: the budget is rearmed at
-    // 0/N on each boot. Starting the engine is an explicit "go for N more".
-    // Resuming a partial count looked like a cap that never reset: the dashboard's
-    // Stop tree-kills the engine, so a run stopped at 3/5 never reached stop(),
-    // and the next start ran only 2 (a spent 14/14 was the same bug, #30). The
-    // engine cannot tell a crash from that kill, so it no longer tries to resume.
-    const trFile = this.testRunPath();
-    if (cfg.boundedRun.n > 0) {
-      const existing = readTestRun(trFile);
-      if (existing) this.log.info(`previous bounded run ended at ${existing.done}/${existing.limit} ${existing.unit}s — starting a new one`);
-      startTestRun(cfg.boundedRun.n, cfg.boundedRun.unit, trFile);
-      this.log.info(`bounded run: 0/${cfg.boundedRun.n} ${cfg.boundedRun.unit}(s)`);
-    } else {
-      clearTestRun(trFile);
-      this.log.warn('UNBOUNDED run — every expensive incident was one.');
     }
 
     this.running = true;
