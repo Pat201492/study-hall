@@ -188,6 +188,8 @@ export class Engine {
   private readonly runRole: (input: RoleRunInput, deps: RunnerDeps) => Promise<RoleRunOutput>;
   private ticking = false;
   private tickCount = 0;
+  /** Consecutive ticks on which every board fetch failed on the network (backoff exponent). */
+  private networkOutages = 0;
   private fairShareOffset = 0;
   private lastTick: EngineStatus['lastTick'];
   private blackedOut = false;
@@ -452,7 +454,7 @@ export class Engine {
 
     // 1. Fetch every board. A board whose fetch fails keeps its previous lists.
     let fetched = 0;
-    const fetchErrors: { slug: string; capacity: boolean; msg: string }[] = [];
+    const fetchErrors: { slug: string; capacity: boolean; network: boolean; msg: string }[] = [];
     const onBoard = new Set<string>();
     const openByRepo = new Map<string, Set<string>>();
     for (const rt of this.repos.values()) {
@@ -474,9 +476,10 @@ export class Engine {
       } catch (e) {
         const msg = (e as Error)?.message ?? String(e);
         const capacity = /rate limit|API rate limit exceeded|abuse detection|secondary rate/i.test(msg);
+        const network = !capacity && isNetworkError(msg);
         rt.fetchError = msg;
-        fetchErrors.push({ slug: rt.slug, capacity, msg });
-        this.log.err(`${rt.slug}: board fetch failed${capacity ? ' — GitHub rate limit' : ''}: ${msg}`);
+        fetchErrors.push({ slug: rt.slug, capacity, network, msg });
+        this.log.err(`${rt.slug}: board fetch failed${capacity ? ' — GitHub rate limit' : network ? ' — GitHub unreachable' : ''}: ${msg}`);
       }
     }
     if (!fetched) {
@@ -487,8 +490,22 @@ export class Engine {
         this.event({ level: 'warn', event: 'capacity.github', reason: fetchErrors[0].msg, data: { until } });
         return;
       }
+      // GitHub unreachable (DNS, reset, timeout, 5xx) is the network, not the
+      // engine. Counted as engine errors, a ~2-minute blip tripped the
+      // 5-in-a-row watchdog kill and left the engine down until a human
+      // restarted it (2026-09-29 20:08, 2026-10-01 01:05). Hold dispatch and
+      // back off instead; any other failure still counts toward the kill.
+      if (fetchErrors.length && fetchErrors.every((f) => f.capacity || f.network)) {
+        const backoff = Math.min(NETWORK_BACKOFF_BASE_MS * 2 ** this.networkOutages, NETWORK_BACKOFF_MAX_MS);
+        this.networkOutages += 1;
+        this.gov.pauseDispatch(now + backoff, 'GitHub unreachable');
+        this.log.warn(`GitHub unreachable — dispatch held ${Math.round(backoff / 1000)}s (outage tick ${this.networkOutages})`);
+        this.event({ level: 'warn', event: 'network.github', reason: fetchErrors[0].msg, data: { until: now + backoff, outageTicks: this.networkOutages } });
+        return;
+      }
       throw new Error(`every board fetch failed: ${fetchErrors.map((f) => f.msg).join('; ')}`);
     }
+    this.networkOutages = 0;
     void this.reporter.sweep(openByRepo, now);
 
     // 2. Watchdog reconcile against what the boards show now.
@@ -1109,4 +1126,12 @@ export class Engine {
 /** A worker's identity across the whole engine: its id is only unique within its provider's pool. */
 export function studentKey(provider: string, workerId: string): string {
   return `${provider}:${workerId}`;
+}
+
+const NETWORK_BACKOFF_BASE_MS = 30_000;
+const NETWORK_BACKOFF_MAX_MS = 15 * 60_000;
+
+/** A failure reaching GitHub at all — as opposed to GitHub answering with an error. */
+export function isNetworkError(msg: string): boolean {
+  return /error connecting to api\.github\.com|could not resolve host|getaddrinfo|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|socket hang up|network is unreachable|i\/o timeout|TLS handshake timeout|HTTP 50[234]\b|Bad Gateway|Service Unavailable|Gateway Time-?out/i.test(msg);
 }
