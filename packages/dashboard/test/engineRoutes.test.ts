@@ -91,6 +91,25 @@ test('boards: the engine view (in-flight, attempts, contested) merges in when th
   assert.equal(pool.providers.anthropic.cap, 4);
 });
 
+test('start rearms a spent bounded run to 0/N at once, and status shows it before the engine boots', async () => {
+  // The relaunch that looked broken: 10/10 on disk, Start pressed, and the old
+  // 10/10 stayed on screen for the ~10s the engine spends cloning before its own
+  // rearm, so the operator stopped it again. Runs while the engine is stopped.
+  const stop = await post('/api/engine/stop');
+  await settle(400);
+  void stop;
+  writeFileSync(join(stateDir, 'testrun.json'), JSON.stringify({ limit: 5, done: 5, unit: 'pr', since: '2026-01-01T00:00:00.000Z' }));
+  const before = await get('/api/status') as { engine: { boundedRun: { done: number; limit: number } | null } };
+  assert.equal(before.engine.boundedRun?.done, 5, 'status reads the live budget file, not the snapshot');
+  const r = await post('/api/engine/start') as { ok: boolean };
+  assert.equal(r.ok, true);
+  const armed = JSON.parse(readFileSync(join(stateDir, 'testrun.json'), 'utf8'));
+  assert.equal(armed.done, 0);
+  assert.equal(armed.limit, 5);
+  const st = await get('/api/status') as { engine: { boundedRun: { done: number; limit: number } | null } };
+  assert.deepEqual([st.engine.boundedRun?.done, st.engine.boundedRun?.limit], [0, 5]);
+});
+
 test('engine controls: start refuses a second child, stop tree-kills it, drain writes the flag', async () => {
   const again = await post('/api/engine/start') as { ok: boolean; msg: string };
   assert.equal(again.ok, false);

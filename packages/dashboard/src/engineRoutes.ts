@@ -13,6 +13,7 @@ import { planLayout, type PlanLayout } from '@study-hall/core/planGraph';
 import { assessPace, paceSamples, DEFAULT_PACE } from '@study-hall/core/windowPace';
 import { estimateWindowCapacity, sustainableTokensPerHour } from '@study-hall/core/windowCapacity';
 import { requestDrain, clearDrain, drainRequested } from '@study-hall/core/drain';
+import { readTestRun, startTestRun, clearTestRun, type TestRunState } from '@study-hall/core/testRun';
 import type { Router } from './router.js';
 import { configPath, mutateConfig, type StudyHallConfig } from './config.js';
 
@@ -52,6 +53,9 @@ export interface EngineView {
   /** True when status.json says the engine process wrote it recently. */
   live: boolean;
   status: EngineStatus | null;
+  /** The bounded-run budget read live from testrun.json, not from the engine's
+   *  last status snapshot, so a just-armed 0/N shows the moment Start is pressed. */
+  boundedRun: TestRunState | null;
   drainRequested: boolean;
   logTail: string[];
 }
@@ -73,6 +77,7 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
   const stateDir = (): string => deps.cfg().stateDir;
   const persistence = (): Persistence => new Persistence({ stateDir: stateDir() });
   const drainFlag = (): string => join(stateDir(), 'drain.flag');
+  const testRunFile = (): string => join(stateDir(), 'testrun.json');
   const proc = new ManagedProcess({ name: 'engine', logFile: join(stateDir(), 'engine.log') });
 
   const readStatus = (): EngineStatus | null => persistence().readStatus();
@@ -80,7 +85,7 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
 
   const view = (): EngineView => {
     const status = readStatus();
-    return { running: proc.isRunning(), pid: proc.isRunning() ? (status?.pid ?? null) : null, live: proc.isRunning() && isLive(status), status, drainRequested: drainRequested(drainFlag()), logTail: proc.logLines(40) };
+    return { running: proc.isRunning(), pid: proc.isRunning() ? (status?.pid ?? null) : null, live: proc.isRunning() && isLive(status), status, boundedRun: readTestRun(testRunFile()), drainRequested: drainRequested(drainFlag()), logTail: proc.logLines(40) };
   };
 
   const start = (): { ok: boolean; msg: string } => {
@@ -88,6 +93,12 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     const c = deps.cfg();
     if (!c.repos.length) return { ok: false, msg: 'no repos configured — add one in Settings first' };
     clearDrain(drainFlag());
+    // Rearm the bounded run HERE, before spawning. The engine also rearms on
+    // boot, but only after cloning and preflight (~10s); until then the old
+    // 10/10 stayed on screen, and a Start that looked like it had not reset the
+    // cap got stopped again before it could.
+    const br = loadEngineConfig(configPath()).boundedRun;
+    if (br.n > 0) startTestRun(br.n, br.unit, testRunFile()); else clearTestRun(testRunFile());
     const cmd = deps.engineCommand ?? { command: process.execPath, args: ['--import', 'tsx', join('packages', 'core', 'src', 'index.ts'), '--live'] };
     const ok = proc.start(cmd.command, cmd.args, {
       cwd: REPO_ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -272,7 +283,7 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
   router.get('/api/boards', async () => {
     const v = view();
     const repos = await Promise.all(deps.cfg().repos.map((r) => boardView(r, v.status, v.live)));
-    return { repos, engine: { running: v.running, live: v.live, tick: v.status?.tick ?? 0, updatedAt: v.status?.updatedAt ?? null, boundedRun: v.status?.boundedRun ?? null, lastTick: v.status?.lastTick ?? null } };
+    return { repos, engine: { running: v.running, live: v.live, tick: v.status?.tick ?? 0, updatedAt: v.status?.updatedAt ?? null, boundedRun: v.boundedRun, lastTick: v.status?.lastTick ?? null } };
   });
 
   router.post('/api/board/unpark', async (ctx) => {

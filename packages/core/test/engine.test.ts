@@ -196,12 +196,17 @@ test('starting again after a finished bounded run rearms it instead of parking o
   r.ledger.close();
 });
 
-test('an UNSPENT budget is resumed, so a crash mid-run does not restart the count', async () => {
+test('an UNSPENT budget from the previous run is reset too: every start is a fresh 0/N', async () => {
+  // The dashboard's Stop tree-kills the engine, so a run stopped at 3/5 never
+  // reached stop() and left 3/5 on disk. Resuming it meant the next start ran
+  // only 2 more: the cap did not reset between runs.
   const r = rig({ config: { boundedRun: { n: 5, unit: 'pr' } }, boards: { 'o/a': { issues: [issue(1)], pulls: [] } } });
   writeFileSync(join(r.stateDir, 'testrun.json'), JSON.stringify({ limit: 5, done: 3, unit: 'pr', since: '2026-01-01T00:00:00.000Z' }));
   await r.engine.boot();
-  const kept = JSON.parse(readFileSync(join(r.stateDir, 'testrun.json'), 'utf8'));
-  assert.equal(kept.done, 3, 'three of five are already spent and stay spent');
+  const armed = JSON.parse(readFileSync(join(r.stateDir, 'testrun.json'), 'utf8'));
+  assert.equal(armed.done, 0, 'a partial count from the last run does not carry into this one');
+  assert.equal(armed.limit, 5);
+  assert.notEqual(armed.since, '2026-01-01T00:00:00.000Z', 'the budget was re-armed, not reused');
   r.ledger.close();
 });
 
