@@ -41,6 +41,8 @@ export interface ServerDeps {
   github?: BoardGitHub;
   /** The command the engine child runs (tests use a sleeper). */
   engineCommand?: { command: string; args: string[] };
+  /** Board read reuse window in ms (default 60 s; tests pass 0 or their own). */
+  boardCacheMs?: number;
   /** Editor/Admissions seams (tests fake the student, GitHub and the checkout). */
   editor?: Pick<EditorDeps, 'runEditorFn' | 'admissionsPort' | 'splitStudent' | 'checkout' | 'fileDeps'>;
   /** Arena export seam (tests return a canned envelope). */
@@ -117,7 +119,7 @@ export function buildRouter(deps: ServerDeps = {}): { router: Router; ledger: Le
 
   const router = new Router();
   const planner = mountPlanner(router, { cfg, ledger, baseUrl: () => `http://127.0.0.1:${cfg().port}` });
-  const engine = mountEngine(router, { cfg, ledger, github: deps.github, engineCommand: deps.engineCommand });
+  const engine = mountEngine(router, { cfg, ledger, github: deps.github, engineCommand: deps.engineCommand, boardCacheMs: deps.boardCacheMs });
   const editor = mountEditor(router, { cfg, ledger, ...(deps.editor ?? {}) });
   mountArena(router, { cfg, exportJson: deps.arenaExport });
 

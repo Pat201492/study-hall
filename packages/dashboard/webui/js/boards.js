@@ -110,8 +110,8 @@ export async function renderBoards(el, { api, fmt }) {
   el.innerHTML = '<div class="empty">loading boards…</div>';
   let mode = 'list';
   try { mode = localStorage.getItem('sh.boards.view') === 'chart' ? 'chart' : 'list'; } catch { /* private window */ }
-  async function load() {
-    const data = await api.get('/api/boards');
+  async function load(fresh = false) {
+    const data = await api.get(fresh ? '/api/boards?fresh=1' : '/api/boards');
     const e = data.engine;
     const line = e.running
       ? `engine <span class="ok">running</span>${e.live ? ` · tick ${e.tick} · ${fmt.ago(Date.now() - Date.parse(e.updatedAt))}` : ' · <span class="warn">no fresh snapshot yet</span>'}${e.boundedRun ? ` · bounded ${e.boundedRun.done}/${e.boundedRun.limit} ${e.boundedRun.unit}s` : ''}${e.lastTick ? ` · last tick: ${e.lastTick.dispatched} dispatched, ${e.lastTick.acted} acted, ${e.lastTick.held} held` : ''}`
@@ -135,7 +135,7 @@ export async function renderBoards(el, { api, fmt }) {
         load();
       });
     }
-    el.querySelector('#reload')?.addEventListener('click', load);
+    el.querySelector('#reload')?.addEventListener('click', () => load(true));
     el.querySelectorAll('button[data-unpark]').forEach((b) => b.addEventListener('click', async () => {
       const [repo, number, target, label] = b.dataset.unpark.split('|');
       b.disabled = true; b.textContent = 'removing…';
@@ -145,6 +145,8 @@ export async function renderBoards(el, { api, fmt }) {
     }));
   }
   await load();
-  const t = setInterval(load, 20_000);
+  // A background tab does not poll: every board read costs GitHub API quota
+  // that the engine and its students share.
+  const t = setInterval(() => { if (!document.hidden) load(); }, 20_000);
   return () => clearInterval(t);
 }
