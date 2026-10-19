@@ -39,8 +39,34 @@ const s = await startServer({
     removeLabel: async (repo, n, label, kind) => { removed.push(`${repo} ${kind} ${n} ${label}`); },
   },
   engineCommand: { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] },
+  boardCacheMs: 0, // these tests change the fake board between calls
 });
 after(() => s.close());
+
+test('boards: one GitHub read per repo is shared until the window passes; Refresh and unpark force a new one', async () => {
+  let reads = 0;
+  const c = await startServer({
+    startCodexQuota: false, port: 0, boardCacheMs: 60_000,
+    github: {
+      fetchIssues: async () => { reads++; return [{ number: 1, title: 'x', body: 'y', labels: [{ name: 'needs-human' }] }]; },
+      listOpenPulls: async () => [],
+      removeLabel: async () => {},
+    },
+    engineCommand: { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] },
+  });
+  try {
+    const g = (p: string) => fetch(c.url + p).then((r) => r.json());
+    await Promise.all([g('/api/boards'), g('/api/boards')]);      // concurrent: one in-flight read
+    await g('/api/boards');                                       // cached
+    assert.equal(reads, 2, 'one read per configured repo (o/a, o/b), not per poll');
+    await g('/api/boards?fresh=1');
+    assert.equal(reads, 4, 'Refresh bypasses the cache');
+    await fetch(c.url + '/api/board/unpark', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ repo: 'o/a', number: 1, target: 'issue', label: 'needs-human' }) });
+    await g('/api/boards');
+    assert.equal(reads, 5, 'unpark drops only that repo');
+  } finally { c.close(); }
+});
 const get = async (p: string) => (await fetch(s.url + p)).json();
 const post = async (p: string, body?: unknown) => (await fetch(s.url + p, { method: 'POST', body: JSON.stringify(body ?? {}), headers: { 'content-type': 'application/json' } })).json();
 const settle = (ms = 150) => new Promise((r) => setTimeout(r, ms));

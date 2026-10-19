@@ -45,6 +45,8 @@ export interface EngineDeps {
   /** Override the spawned command (tests use a sleeper). */
   engineCommand?: { command: string; args: string[] };
   now?: () => number;
+  /** How long one GitHub read of a board is reused (default 60 s; tests pass 0). */
+  boardCacheMs?: number;
 }
 
 export interface EngineView {
@@ -240,13 +242,30 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
   });
 
   // ---- boards ------------------------------------------------------------------------
+  // One GitHub read per repo per BOARD_TTL_MS, shared by every tab and poll.
+  // Uncached, each /api/boards poll (every 20 s per open tab) re-ran
+  // `pr list --json ...files,statusCheckRollup` for every repo -- an expensive
+  // GraphQL query -- and with the engine STOPPED an open dashboard alone drew
+  // ~70 points/min, exhausting the 5000/h limit that the engine and students
+  // share (2026-10-18). Concurrent callers share the in-flight request; a
+  // failed read is not cached; unpark and a manual Refresh drop the entry.
+  const BOARD_TTL_MS = deps.boardCacheMs ?? 60_000;
+  const boardCache = new Map<string, { at: number; p: Promise<[RawIssue[], OpenPull[]]> }>();
+  const fetchBoard = (slug: string): Promise<[RawIssue[], OpenPull[]]> => {
+    const hit = boardCache.get(slug);
+    if (hit && now() - hit.at < BOARD_TTL_MS) return hit.p;
+    const p = Promise.all([hub.fetchIssues(slug), hub.listOpenPulls(slug)]);
+    boardCache.set(slug, { at: now(), p });
+    p.catch(() => { if (boardCache.get(slug)?.p === p) boardCache.delete(slug); });
+    return p;
+  };
   const boardView = async (repo: string, status: EngineStatus | null, live: boolean): Promise<BoardView> => {
     const slug = repoSlug(repo);
     const fromEngine = live && !!status?.repos[slug];
     const es = status?.repos[slug];
     const ecfg = loadEngineConfig(configPath());
     try {
-      const [issues, pulls] = await Promise.all([hub.fetchIssues(slug), hub.listOpenPulls(slug)]);
+      const [issues, pulls] = await fetchBoard(slug);
       const actions = classify(issues, pulls, { autoMerge: ecfg.autoMerge, triage: ecfg.triage, issueAudit: ecfg.issueAudit }, slug);
       const title = (target: 'issue' | 'pr', n: number): string => (target === 'issue' ? issues.find((i) => i.number === n)?.title : pulls.find((p) => p.number === n)?.title) ?? '';
       const ready = actions.map((a) => ({ number: a.number, title: title(a.target, a.number), target: a.target, kind: a.kind, reason: a.reason }));
@@ -280,7 +299,8 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     }
   };
 
-  router.get('/api/boards', async () => {
+  router.get('/api/boards', async (ctx) => {
+    if (ctx.query.get('fresh') === '1') boardCache.clear();   // the page's Refresh button
     const v = view();
     const repos = await Promise.all(deps.cfg().repos.map((r) => boardView(r, v.status, v.live)));
     return { repos, engine: { running: v.running, live: v.live, tick: v.status?.tick ?? 0, updatedAt: v.status?.updatedAt ?? null, boundedRun: v.boundedRun, lastTick: v.status?.lastTick ?? null } };
@@ -291,6 +311,7 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     if (typeof repo !== 'string' || !Number.isInteger(number) || (target !== 'issue' && target !== 'pr')) throw new Error('repo, number and target (issue|pr) are required');
     if (typeof label !== 'string' || !PARKED_LABELS.includes(label)) throw new Error(`label must be one of ${PARKED_LABELS.join(', ')}`);
     await hub.removeLabel(repoSlug(repo), number as number, label, target);
+    boardCache.delete(repoSlug(repo));
     deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: 'board.unpark', repo: repoSlug(repo), item: number as number, reason: label });
     return { ok: true, removed: label };
   });
