@@ -425,6 +425,23 @@ export interface ClaudeCodeDeps {
 
 const PROBE_PROMPT = 'Reply with exactly the word OK.';
 
+/**
+ * The environment for a `claude` child: the parent's, minus the variables
+ * that would move the CLI off the subscription login onto metered API
+ * billing. The CLI prefers ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) over
+ * its OAuth login when one is present, so a key set machine-wide for some
+ * other tool (2026-10-19: `setx ANTHROPIC_API_KEY` for the scrubber's
+ * research assistant) would silently bill every student to that key. Same
+ * rule codex.ts applies to OPENAI_API_KEY. Only the INHERITED copies are
+ * removed: a caller that passes a key in `extra` on purpose still gets it.
+ */
+export function subscriptionEnv(extra?: NodeJS.ProcessEnv, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  return { ...env, ...(extra ?? {}) };
+}
+
 /** Spawn, collect stdout/stderr, settle on close. For the preflight only. */
 function collect(spawnFn: SpawnLike, bin: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number | null; error?: Error }> {
   return new Promise((resolve) => {
@@ -433,7 +450,7 @@ function collect(spawnFn: SpawnLike, bin: string, args: string[], cwd: string): 
     let settled = false;
     let child: ChildLike;
     try {
-      child = spawnFn(bin, args, { cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnFn(bin, args, { cwd, shell: false, windowsHide: true, env: subscriptionEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       resolve({ stdout, stderr, code: null, error: e as Error });
       return;
@@ -483,7 +500,7 @@ export function createClaudeCodeHarness(deps: ClaudeCodeDeps = {}): Harness {
           cwd: opts.cwd,
           shell: false,
           windowsHide: true,
-          env: { ...process.env, ...(opts.env ?? {}) },
+          env: subscriptionEnv(opts.env),
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {

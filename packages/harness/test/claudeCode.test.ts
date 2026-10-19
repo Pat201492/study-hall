@@ -209,6 +209,26 @@ test('run spawns the resolved binary with shell:false, pipes, merged env, and th
   assert.equal(r.text, 'done');
 });
 
+test('a machine-wide ANTHROPIC_API_KEY never reaches a student: it stays on the subscription login', async () => {
+  const saved = { k: process.env.ANTHROPIC_API_KEY, t: process.env.ANTHROPIC_AUTH_TOKEN };
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-should-not-leak';
+  process.env.ANTHROPIC_AUTH_TOKEN = 'tok-should-not-leak';
+  try {
+    const { spawnFn, calls } = makeSpawn({ stdout: `${resultEvent()}\n` });
+    await harness().run('p', { cwd: '/wt', spawnFn });
+    assert.equal(calls[0].options.env?.ANTHROPIC_API_KEY, undefined);
+    assert.equal(calls[0].options.env?.ANTHROPIC_AUTH_TOKEN, undefined);
+    assert.ok(calls[0].options.env?.PATH ?? calls[0].options.env?.Path, 'the rest of the env is kept');
+    // A key passed deliberately for this run is respected.
+    const own = makeSpawn({ stdout: `${resultEvent()}\n` });
+    await harness().run('p', { cwd: '/wt', spawnFn: own.spawnFn, env: { ANTHROPIC_API_KEY: 'sk-ant-explicit' } });
+    assert.equal(own.calls[0].options.env?.ANTHROPIC_API_KEY, 'sk-ant-explicit');
+  } finally {
+    if (saved.k === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = saved.k;
+    if (saved.t === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN; else process.env.ANTHROPIC_AUTH_TOKEN = saved.t;
+  }
+});
+
 test('deps.spawnFn is the default and opts.spawnFn wins over it', async () => {
   const dep = makeSpawn({ stdout: `${resultEvent({ result: 'from-deps' })}\n` });
   const h = createClaudeCodeHarness({ resolveBin: fakeBin, spawnFn: dep.spawnFn });

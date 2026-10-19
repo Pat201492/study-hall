@@ -5,7 +5,7 @@ import type {
 } from '../contract.js';
 import { NdjsonFramer } from '../ndjson.js';
 import { resolveBin as defaultResolveBin, treeKill, type ResolvedBin } from '../proc.js';
-import { classifyClaudeFailure, parseClaudeResult, quotaFromRateLimitEvent } from './claudeCode.js';
+import { classifyClaudeFailure, parseClaudeResult, quotaFromRateLimitEvent, subscriptionEnv } from './claudeCode.js';
 
 // The planner's interactive transport on Claude Code: ONE long-lived stock
 // `claude -p --input-format stream-json --output-format stream-json` process.
@@ -193,7 +193,7 @@ export function createClaudeChat(opts: ChatOptions, deps: ClaudeChatDeps = {}): 
       cwd: opts.cwd,
       shell: false,
       windowsHide: true,
-      env: { ...process.env, ...(opts.env ?? {}) },
+      env: subscriptionEnv(opts.env),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e) {
