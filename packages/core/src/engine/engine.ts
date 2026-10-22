@@ -155,7 +155,9 @@ export interface EngineOptions {
 
 export type TickOutcome = 'ran' | 'skipped-overlap' | 'skipped-stopped';
 
-const SILENT_HOLDS = new Set(['no-slots']);
+// board-parked repeats every tick for as long as a board stays parked; the park
+// itself is logged once, as a ledger event, by the dashboard route that set it.
+const SILENT_HOLDS = new Set(['no-slots', 'board-parked']);
 
 export class Engine {
   readonly repos = new Map<string, RepoRuntime>();
@@ -541,10 +543,11 @@ export class Engine {
     this.gov.setParallelism(configuredParallel);
 
     // 4. Decide.
+    const parkedRepos = new Set(cfg.parkedRepos ?? []);
     const boards: BoardSnapshot[] = [...this.repos.values()].map((rt) => ({
       repo: rt.slug, issues: rt.issues, pulls: rt.pulls,
       handled: rt.memory.handled, quarantined: rt.memory.quarantined, promoted: this.promoted(rt),
-      contested: contested.has(rt.slug),
+      contested: contested.has(rt.slug), parked: parkedRepos.has(rt.slug),
     }));
     const inFlightPerProvider: Record<string, number> = {};
     for (const e of this.inFlight.values()) inFlightPerProvider[e.decision.provider] = (inFlightPerProvider[e.decision.provider] ?? 0) + 1;

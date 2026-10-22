@@ -20,7 +20,7 @@ function board(repo: string, o: Partial<BoardSnapshot> = {}): BoardSnapshot {
   return {
     repo, issues: o.issues ?? [], pulls: o.pulls ?? [],
     handled: o.handled ?? new Set(), quarantined: o.quarantined ?? new Set(), promoted: o.promoted ?? new Set(),
-    contested: o.contested,
+    contested: o.contested, parked: o.parked,
   };
 }
 function quota(provider: string, state: QuotaSnapshot['state']): QuotaSnapshot {
@@ -206,6 +206,20 @@ test('a RESOLVE dispatch is a contention event on its own', () => {
   })], state(), cfg);
   assert.equal(dispatches(out.decisions)[0].role, 'resolve');
   assert.equal(out.contention, 1);
+});
+
+test('a parked board starts nothing (not even a merge) while another board still runs (#51)', () => {
+  const boards = [
+    board('o/parked', { parked: true, issues: [issue({ number: 1 })], pulls: [pull({ number: 10, headRefName: 'feat/issue-2', labels: ['reviewed-ok'] })] }),
+    board('o/live', { issues: [issue({ number: 5 })] }),
+  ];
+  const out = decide(boards, state(), cfg);
+  const parkedHolds = holds(out.decisions).filter((h) => h.reason === 'board-parked');
+  assert.equal(parkedHolds.length, 1);
+  assert.equal(parkedHolds[0].repo, 'o/parked');
+  const touched = [...dispatches(out.decisions), ...acts(out.decisions)].map((d) => d.action.repo);
+  assert.ok(!touched.includes('o/parked'), 'nothing dispatched or acted on the parked board');
+  assert.ok(dispatches(out.decisions).some((d) => d.action.repo === 'o/live'), 'the other board still dispatches');
 });
 
 test('tick-level holds: blackout, drain, capacity pause and a spent bounded run stop everything', () => {

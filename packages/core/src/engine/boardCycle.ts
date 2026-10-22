@@ -37,6 +37,8 @@ export interface BoardSnapshot {
   promoted: ReadonlySet<number>;
   /** Another writer is reshaping this board (watchdog.boardContested). */
   contested?: boolean;
+  /** The operator parked this board from the Boards tab: start nothing on it. */
+  parked?: boolean;
 }
 
 /** Engine-wide state the decision depends on. Everything is data; nothing is read live. */
@@ -88,7 +90,7 @@ export type CycleConfig = Pick<EngineConfig, 'optimizationMode' | 'pools' | 'max
 };
 
 export type HoldReason =
-  | 'blackout' | 'drain' | 'capacity-pause' | 'bounded-run-spent' | 'contested'
+  | 'blackout' | 'drain' | 'capacity-pause' | 'bounded-run-spent' | 'contested' | 'board-parked'
   | 'file-collision' | 'no-slots' | 'provider' | 'no-model' | 'rate-capped';
 
 export type Decision =
@@ -263,6 +265,12 @@ export function decide(boards: BoardSnapshot[], state: CycleState, cfg: CycleCon
   const views = new Map<string, RepoView>();
   const byRepo = new Map<string, BoardAction[]>();
   for (const snap of boards) {
+    // An operator-parked board is skipped whole, before classification: no
+    // dispatch and no act (not even a merge) until it is unparked.
+    if (snap.parked) {
+      decisions.push({ kind: 'hold', scope: 'repo', reason: 'board-parked', repo: snap.repo });
+      continue;
+    }
     if (snap.contested) {
       decisions.push({ kind: 'hold', scope: 'repo', reason: 'contested', repo: snap.repo });
       continue;

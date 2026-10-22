@@ -179,6 +179,28 @@ test('ladder tallies come from the ledger and survive a restart', async () => {
   assert.equal(pool.ladderSession, null, 'engine stopped: no process-memory tallies');
 });
 
+test('park board: the toggle writes parkedRepos, /api/boards shows it, and unpark clears it (#51)', async () => {
+  const on = await post('/api/board/park', { repo: 'o/a', parked: true }) as { ok: boolean; parkedRepos: string[] };
+  assert.equal(on.ok, true);
+  assert.deepEqual(JSON.parse(readFileSync(cfgFile, 'utf8')).parkedRepos, ['o/a']);
+  assert.deepEqual(on.parkedRepos, ['o/a']);
+  let b = await get('/api/boards?fresh=1') as { repos: Array<{ repo: string; boardParked?: boolean }> };
+  assert.deepEqual(b.repos.map((r) => [r.repo, r.boardParked]), [['o/a', true], ['o/b', false]]);
+  // Parking twice does not duplicate the entry.
+  await post('/api/board/park', { repo: 'https://github.com/o/a', parked: true });
+  assert.deepEqual(JSON.parse(readFileSync(cfgFile, 'utf8')).parkedRepos, ['o/a']);
+
+  const off = await post('/api/board/park', { repo: 'o/a', parked: false }) as { ok: boolean; parkedRepos: string[] };
+  assert.equal(off.ok, true);
+  assert.deepEqual(JSON.parse(readFileSync(cfgFile, 'utf8')).parkedRepos, []);
+  b = await get('/api/boards?fresh=1') as typeof b;
+  assert.equal(b.repos[0].boardParked, false);
+
+  const stranger = await fetch(s.url + '/api/board/park', { method: 'POST', body: JSON.stringify({ repo: 'x/y', parked: true }), headers: { 'content-type': 'application/json' } });
+  assert.ok(!stranger.ok, 'an unconfigured repo is refused');
+  assert.deepEqual(JSON.parse(readFileSync(cfgFile, 'utf8')).parkedRepos, []);
+});
+
 test('bounded-run setting writes config and refuses an implicit unbounded run', async () => {
   const r = await post('/api/settings/bounded-run', { n: 3, unit: 'merge' }) as { ok: boolean; boundedRun: { n: number; unit: string } };
   assert.equal(r.ok, true);

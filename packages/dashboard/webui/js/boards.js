@@ -10,8 +10,17 @@ function item(target, n, title, fmt, extra = '') {
   return `<div class="kv"><span><span class="mono muted">${target === 'pr' ? 'PR' : '#'}${n}</span> ${fmt.esc(title)}</span><span>${extra}</span></div>`;
 }
 
+// The park toggle sits in every board's header, in both views. Parked = the
+// engine starts nothing on this board until it is unparked (in-flight finishes).
+function parkToggle(b, fmt) {
+  return `<button class="btn${b.boardParked ? ' active' : ''}" data-park="${fmt.esc(b.repo)}" data-parked="${b.boardParked ? '1' : '0'}" title="${b.boardParked ? 'Resume: let the engine work this board again' : 'Park: the engine starts nothing on this board (in-flight work finishes)'}">${b.boardParked ? 'Unpark board' : 'Park board'}</button>`;
+}
+function parkedBadge(b) {
+  return b.boardParked ? ' <span class="pill warn" title="Parked from the Boards tab: no new work starts here">parked</span>' : '';
+}
+
 function repoCard(b, fmt) {
-  const head = `<div class="kv"><h2>${fmt.esc(b.repo)}</h2><span class="muted">${b.error ? '' : `${b.counts.issues} issues · ${b.counts.pulls} PRs`}${b.contested ? ' · <span class="bad">contested</span>' : ''}${b.fromEngine ? '' : ' · <span class="muted">engine view absent</span>'}</span></div>`;
+  const head = `<div class="kv"><h2>${fmt.esc(b.repo)}${parkedBadge(b)}</h2><span class="muted">${parkToggle(b, fmt)} ${b.error ? '' : `${b.counts.issues} issues · ${b.counts.pulls} PRs`}${b.contested ? ' · <span class="bad">contested</span>' : ''}${b.fromEngine ? '' : ' · <span class="muted">engine view absent</span>'}</span></div>`;
   if (b.error && !b.ready.length && !b.inFlight.length) {
     return `<div class="card">${head}<div class="bad">fetch failed: ${fmt.esc(b.error)}</div></div>`;
   }
@@ -96,7 +105,7 @@ function planSvg(plan, fmt) {
 }
 
 function planCard(b, fmt) {
-  const head = `<div class="kv"><h2>${fmt.esc(b.repo)}</h2><span class="muted">${b.plan ? `${b.plan.total} open · ${b.plan.buildableNow} buildable now · ${b.plan.waves} wave${b.plan.waves === 1 ? '' : 's'}` : ''}</span></div>`;
+  const head = `<div class="kv"><h2>${fmt.esc(b.repo)}${parkedBadge(b)}</h2><span class="muted">${parkToggle(b, fmt)} ${b.plan ? `${b.plan.total} open · ${b.plan.buildableNow} buildable now · ${b.plan.waves} wave${b.plan.waves === 1 ? '' : 's'}` : ''}</span></div>`;
   if (b.error && !b.plan) return `<div class="card">${head}<div class="bad">fetch failed: ${fmt.esc(b.error)}</div></div>`;
   if (!b.plan) return `<div class="card">${head}<div class="muted">no plan available — the engine's cached view has no issue bodies to read dependencies from</div></div>`;
   const cycles = b.plan.cycles.length
@@ -136,6 +145,13 @@ export async function renderBoards(el, { api, fmt }) {
       });
     }
     el.querySelector('#reload')?.addEventListener('click', () => load(true));
+    el.querySelectorAll('button[data-park]').forEach((b) => b.addEventListener('click', async () => {
+      const parked = b.dataset.parked !== '1';
+      b.disabled = true; b.textContent = parked ? 'parking…' : 'resuming…';
+      const r = await api.post('/api/board/park', { repo: b.dataset.park, parked });
+      if (!r.ok) { b.textContent = r.msg || 'failed'; b.disabled = false; return; }
+      await load();
+    }));
     el.querySelectorAll('button[data-unpark]').forEach((b) => b.addEventListener('click', async () => {
       const [repo, number, target, label] = b.dataset.unpark.split('|');
       b.disabled = true; b.textContent = 'removing…';

@@ -28,6 +28,15 @@ test('overriding a tier\'s model in config.json keeps its default label and the 
   assert.equal(cfg.pools.openai.tiers.sonnet?.model, DEFAULT_POOLS.openai.tiers.sonnet?.model);
 });
 
+test('parkedRepos loads normalised: URLs become owner/name, junk and duplicates are dropped (#51)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sh-parked-'));
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify({ parkedRepos: ['https://github.com/o/a', 'o/a', 'not a repo', 7, 'o/b'] }));
+  assert.deepEqual(loadEngineConfig(path, {}).parkedRepos, ['o/a', 'o/b']);
+  writeFileSync(path, JSON.stringify({}));
+  assert.deepEqual(loadEngineConfig(path, {}).parkedRepos, []);
+});
+
 test('a Protector names its students with the label it is given', () => {
   const p = new Protector({ perTierMax: 2, totalCap: 4, maxConcurrent: 2, worktreeRoot: 'w', idLabel: (t) => (t === 'opus' ? 'sol' : t) });
   const [a] = p.assign([{ id: 't1', tier: 'opus', role: 'implement' }]);

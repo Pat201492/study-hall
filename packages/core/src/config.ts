@@ -80,6 +80,10 @@ export interface EngineConfig {
    */
   autoCompact?: AutoCompact;
   boundedRun: BoundedRunConfig;
+  /** Boards the operator has parked from the Boards tab (owner/name). The engine
+   *  starts nothing on them (no dispatch, no act) until unparked; in-flight work
+   *  finishes. Re-read every tick, so a toggle needs no restart. */
+  parkedRepos?: string[];
   /** Heartbeat period. v1 drained the GitHub API at 2 s; 20 s is measured-safe. */
   pollMs: number;
   /** Structured crash-burst standdown: N same-signature failures within M minutes. */
@@ -232,6 +236,7 @@ export function loadEngineConfig(path: string = engineConfigPath(), env: NodeJS.
     studentBudget: { ...DEFAULT_STUDENT_BUDGET, ...(raw.studentBudget ?? {}) },
     acTiering: { ...DEFAULT_AC_TIERING, ...(raw.acTiering ?? {}) },
     boundedRun: { ...DEFAULT_ENGINE_CONFIG.boundedRun, ...(raw.boundedRun ?? {}) },
+    parkedRepos: parkedRepoList(raw.parkedRepos),
     crashBurst: { ...DEFAULT_ENGINE_CONFIG.crashBurst, ...(raw.crashBurst ?? {}) },
     provider: {
       ...DEFAULT_PROVIDER_SETTINGS, ...(raw.provider ?? {}),
@@ -258,4 +263,16 @@ export function tierLabel(cfg: Pick<EngineConfig, 'pools'>, provider: string, ti
 /** The model a provider runs a tier on, honouring disabled tiers via tierFallback upstream. */
 export function modelFor(cfg: EngineConfig, provider: string, tier: Tier): string | undefined {
   return cfg.pools[provider]?.tiers[tier]?.model;
+}
+
+/** `parkedRepos` from config.json, normalised like `repos`; a malformed entry is
+ *  dropped rather than failing the whole config load. */
+function parkedRepoList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const r of raw) {
+    if (typeof r !== 'string') continue;
+    try { out.push(normalizeRepo(r)); } catch { /* not a repo: ignore */ }
+  }
+  return [...new Set(out)];
 }
