@@ -67,6 +67,8 @@ export interface BoardView extends Omit<RepoStatus, 'attempts'> {
   attempts: Record<string, number>;
   /** Whether the engine's snapshot (in-flight, attempts) was merged in. */
   fromEngine: boolean;
+  /** The operator parked this whole board (config.json `parkedRepos`). */
+  boardParked?: boolean;
   /** The same board as build-order waves; absent when the fetch failed. */
   plan?: PlanLayout;
 }
@@ -302,7 +304,9 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
   router.get('/api/boards', async (ctx) => {
     if (ctx.query.get('fresh') === '1') boardCache.clear();   // the page's Refresh button
     const v = view();
-    const repos = await Promise.all(deps.cfg().repos.map((r) => boardView(r, v.status, v.live)));
+    const parked = new Set(loadEngineConfig(configPath()).parkedRepos ?? []);
+    const repos = (await Promise.all(deps.cfg().repos.map((r) => boardView(r, v.status, v.live))))
+      .map((b) => ({ ...b, boardParked: parked.has(repoSlug(b.repo)) }));
     return { repos, engine: { running: v.running, live: v.live, tick: v.status?.tick ?? 0, updatedAt: v.status?.updatedAt ?? null, boundedRun: v.boundedRun, lastTick: v.status?.lastTick ?? null } };
   });
 
@@ -314,6 +318,21 @@ export function mountEngine(router: Router, deps: EngineDeps): { stop: () => voi
     boardCache.delete(repoSlug(repo));
     deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: 'board.unpark', repo: repoSlug(repo), item: number as number, reason: label });
     return { ok: true, removed: label };
+  });
+
+  // Park / unpark a whole board. The engine re-reads config every tick, so this
+  // takes effect within one poll without a restart; in-flight work finishes.
+  router.post('/api/board/park', (ctx) => {
+    const { repo, parked } = ctx.body as { repo?: unknown; parked?: unknown };
+    if (typeof repo !== 'string' || typeof parked !== 'boolean') throw new Error('repo and parked (boolean) are required');
+    const slug = repoSlug(repo);
+    if (!deps.cfg().repos.some((r) => repoSlug(r) === slug)) throw new Error(`${slug} is not a configured repo`);
+    mutateConfig(configPath(), (raw) => {
+      const list = (Array.isArray(raw.parkedRepos) ? raw.parkedRepos : []).filter((r): r is string => typeof r === 'string' && repoSlug(r) !== slug);
+      raw.parkedRepos = parked ? [...list, slug] : list;
+    });
+    deps.ledger.recordEvent({ ts: new Date(now()).toISOString(), level: 'info', event: parked ? 'board.park' : 'board.resume', repo: slug, reason: parked ? 'parked from the Boards tab' : 'unparked from the Boards tab' });
+    return { ok: true, repo: slug, parked, parkedRepos: loadEngineConfig(configPath()).parkedRepos ?? [] };
   });
 
   // ---- pool -----------------------------------------------------------------------------

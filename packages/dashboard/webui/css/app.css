@@ -44,6 +44,9 @@ th { color: var(--muted); font-weight: 500; }
 tr.row { cursor: pointer; } tr.row:hover { background: #1c2129; }
 .pill { padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
 .pill.anthropic { color: var(--claude); border-color: var(--claude); } .pill.openai { color: var(--gpt); border-color: var(--gpt); } .pill.local { color: var(--muted); }
+.pill.warn { border-color: var(--warn); }
+/* Boards tab: a parked board's toggle reads as "on" (#51). */
+.btn.active { border-color: var(--warn); color: var(--warn); }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .filters input, .filters select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
 pre.log { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
